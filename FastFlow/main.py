@@ -341,7 +341,12 @@ def train(args):
     
     config = yaml.safe_load(open(args.config, "r"))
 
-    wandb.init(project="AD4DD", config=config, name=args.run_name, mode=args.wandb)
+    wandb.init(
+        entity="orazio-mattia",
+        project="MuFlow", 
+        config=config, 
+        name=args.run_name, 
+        mode=args.wandb)
     wandb.config.update(args)
 
     model = build_model(config, args.model_type, args)
