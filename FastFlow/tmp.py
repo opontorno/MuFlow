@@ -13,8 +13,8 @@ import matplotlib.pyplot as plt
 
 run = 'ricercadellaricercadelbuono'
 
-labels = np.load(f'/home/mlitrico/AD4DD/FastFlow/logs/{run}/labels_best.npy')
-preds_ = np.load(f'/home/mlitrico/AD4DD/FastFlow/logs/{run}/preds_best.npy')
+labels = np.load(f'~/MuFlow/FastFlow/logs/{run}/labels_best.npy')
+preds_ = np.load(f'~/MuFlow/FastFlow/logs/{run}/preds_best.npy')
 
 """likelihood_real = preds_[labels == 0][:1000]
 likelihood_fake = preds_[labels == 14]
@@ -93,14 +93,14 @@ def build_model(config, model_type):
     return model
 
 
-config = yaml.safe_load(open('/home/mlitrico/AD4DD/FastFlow/configs/resnet18.yaml', "r"))
+config = yaml.safe_load(open('/home/opontorno/MuFlow/FastFlow/configs/resnet18.yaml', "r"))
 
 model = build_model(config, 'FastFlow')
 model.cuda()
 
 model.train()
 
-checkpoint = torch.load(f'/home/mlitrico/AD4DD/FastFlow/logs/{run}/best.pt')
+checkpoint = torch.load(f'/home/opontorno/MuFlow/FastFlow/logs/{run}/best.pt')
 
 model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -210,7 +210,7 @@ print(f"Average Precision: {mean_ap:.4f}")
 print("="*30 + "\n")
 
 np.savez(
-    f'/home/mlitrico/AD4DD/FastFlow/logs/{run}/thresholds.npz',
+    f'/home/opontorno/MuFlow/FastFlow/logs/{run}/thresholds.npz',
     threshold=threshold,
     mean=preds_train.mean(),
     std=preds_train.std()

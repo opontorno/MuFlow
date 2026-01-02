@@ -70,4 +70,4 @@ parameters:
   #   max: 0.5
 
 program: main.py
-project: AD4DD
+project: MuFlow

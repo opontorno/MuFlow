@@ -16,7 +16,7 @@ from sklearn.mixture import GaussianMixture
 # === Hyperparameters ===
 model_name = "densenet121"
 
-config_path = f"/home/mlitrico/AD4DD/FastFlow/configs/{model_name}.yaml" 
+config_path = f"~/MuFlow/FastFlow/configs/{model_name}.yaml" 
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 
@@ -110,4 +110,4 @@ for i in range(len(real_features[0])):
     clf.fit(real_features_)
     gmm["real"].append([clf.means_, clf.covariances_])
 
-np.save(f"/home/mlitrico/AD4DD/parameters/gmm_parameters_{model_name}_{reals}_{config['input_size']}.npy", gmm)
+np.save(f"~/MuFlow/parameters/gmm_parameters_{model_name}_{reals}_{config['input_size']}.npy", gmm)
