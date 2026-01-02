@@ -218,7 +218,7 @@ def compute_threshold(val_dataloader, model, model_type="FastFlow", use_lof=Fals
     return result
 
 
-def eval_once(dataloader, model, epoch=None, model_type="FastFlow", class2idx=None, threshold_info=None): 
+def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, threshold_info=None): 
     model.eval()
     labels_list = []
     preds_list = []
@@ -253,7 +253,7 @@ def eval_once(dataloader, model, epoch=None, model_type="FastFlow", class2idx=No
         threshold = threshold_info['threshold']
         preds = (preds_ > threshold).astype(int)
     
-    if epoch:
+    if epoch % 50 == 0:
         likelihood_real = preds_[labels == 0]
         likelihood_fake = preds_[labels > 0]
 
@@ -287,7 +287,7 @@ def eval_once(dataloader, model, epoch=None, model_type="FastFlow", class2idx=No
         
         min_len = min(len(y_true_c), len(y_true_0))
         if min_len == 0:
-            print(f"  > Classe {class2idx[c] if class2idx else c}: SALTATA (0 campioni)")
+            print(f"  > Class {class2idx[c] if class2idx else c}: SKIPPED (0 samples)")
             continue
         
         #Shuffling real to get different subset each time
@@ -406,7 +406,7 @@ def train(args):
                 best_acc = current_acc
                 patience_counter = 0
                 
-                print(f"Epoch {epoch+1}: Nuova best accuracy: {best_acc:.4f}. Salvataggio modello.")
+                print(f"Epoch {epoch+1}: New best accuracy: {best_acc:.4f}. Saving model.")
                 
                 
                 wandb.run.summary["best_accuracy"] = best_acc
@@ -449,13 +449,13 @@ def train(args):
             
             else:
                 patience_counter += 1 
-                print(f"Epoch {epoch+1}: Accuracy ({current_acc:.4f}) non migliorata rispetto a {best_acc:.4f}. Pazienza: {patience_counter}/{args.early_stopping_patience}")
+                print(f"Epoch {epoch+1}: Accuracy ({current_acc:.4f}) not improved compared to {best_acc:.4f}. Patience: {patience_counter}/{args.early_stopping_patience}")
 
         if patience_counter >= args.early_stopping_patience:
-            print(f"Stopping early all'epoca {epoch + 1} dopo {args.early_stopping_patience} epoche senza miglioramento della Val Acc.")
+            print(f"Stopping early at epoch {epoch + 1} after {args.early_stopping_patience} epochs without improvement of Val Acc.")
             break
     
-    print(f"Training terminato. Migliore accuracy: {best_acc:.4f}")
+    print(f"Training finished. Best accuracy: {best_acc:.4f}")
 
 
 def parse_args():

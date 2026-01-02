@@ -179,7 +179,7 @@ for c in classes[1:]:
     
     min_len = min(len(y_true_c), len(y_true_0))
     if min_len == 0:
-        print(f"  > Classe {class2idx[c] if class2idx else c}: SALTATA (0 campioni)")
+        print(f"  > Class {class2idx[c] if class2idx else c}: SKIPPED (0 samples)")
         continue
 
     #Shuffling real to get different subset each time

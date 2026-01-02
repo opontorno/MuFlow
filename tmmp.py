@@ -5,12 +5,12 @@ CSV_PATH = '/media/orazio_mattia_group/ad4dd/dataset_split.csv'
 old_root = "/media/orazio_mattia_group/ad4dd/celeba_hq/"
 new_root = "/mnt/storage/ad4dd/celeba_hq/"
 
-# Carica CSV
+# Load CSV
 df = pd.read_csv(CSV_PATH)
 
-# Sostituisci il path
+# Replace the path
 df["path"] = df["path"].str.replace(old_root, new_root, regex=False)
 
-# Salva nuovo CSV
+# Save new CSV
 df.to_csv("dataset_split.csv", index=False)
-print("CSV aggiornato salvato come 'percorsi_modificati.csv'")
+print("Updated CSV saved as 'dataset_split.csv'")

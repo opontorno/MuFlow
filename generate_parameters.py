@@ -12,11 +12,13 @@ import timm
 import yaml
 from sklearn.manifold import TSNE
 from sklearn.mixture import GaussianMixture
+from sklearn.preprocessing import StandardScaler
+import FastFlow.constants as const
 
 # === Hyperparameters ===
-model_name = "densenet121"
+model_name = "resnet101"
 
-config_path = f"~/MuFlow/FastFlow/configs/{model_name}.yaml" 
+config_path = f"{const.WORKING_DIR}/FastFlow/configs/{model_name}.yaml" 
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 
@@ -102,12 +104,28 @@ for img_path in real_sample:
     
 gmm = {"real": []}
 
-clf = GaussianMixture()
+# Use reg_covar to regularize covariance and ensure numerical stability
+clf = GaussianMixture(reg_covar=1e-6, n_components=1)
+scaler = StandardScaler()
 for i in range(len(real_features[0])):
     real_features_ = np.stack([feats[i] for feats in real_features])
+    # Convert to float64 for better numerical accuracy
+    real_features_ = real_features_.astype(np.float64)
     print(real_features_.shape)
     
-    clf.fit(real_features_)
-    gmm["real"].append([clf.means_, clf.covariances_])
+    # Scale the features to improve numerical stability
+    real_features_scaled = scaler.fit_transform(real_features_)
+    
+    clf.fit(real_features_scaled)
+    
+    # Transform means and covariances back to original feature space
+    means_original = scaler.inverse_transform(clf.means_)
+    # Covariance transformation: if y = (x - mean) / scale, then cov_y = cov_x / scale^2
+    # So cov_x = cov_y * scale^2, which in matrix form is: S @ cov_y @ S^T
+    # where S is the diagonal scaling matrix
+    scale_matrix = np.diag(scaler.scale_)
+    covariances_original = scale_matrix @ clf.covariances_ @ scale_matrix.T
+    
+    gmm["real"].append([means_original, covariances_original])
 
-np.save(f"~/MuFlow/parameters/gmm_parameters_{model_name}_{reals}_{config['input_size']}.npy", gmm)
+np.save(f"{const.WORKING_DIR}/parameters/gmm_parameters_{model_name}_{reals}_{config['input_size']}.npy", gmm)
