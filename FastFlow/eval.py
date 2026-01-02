@@ -18,7 +18,6 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 
-import pdb
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import accuracy_score, average_precision_score
 from sklearn.neighbors import LocalOutlierFactor
@@ -87,8 +86,10 @@ def create_dataloader_w_celeba(args, config, opt):
     return data_loader, {v: k for k, v in class_to_idx_.items()}
 
 
-def build_model(config, model_type):
-    
+def build_model(config, model_type, args):
+    """
+    Build model - unified function shared with main.py
+    """
     gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_fourier_{args.reals}_{config['input_size']}.npy" if args.use_fourier \
                 else f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_{args.reals}_{config['input_size']}.npy"
     
@@ -240,7 +241,7 @@ def evaluate(args):
 
     gmm = joblib.load(args.gmm_checkpoint) if args.gmm_checkpoint else None
 
-    model = build_model(config, args.model_type)  # Pass the model type here
+    model = build_model(config, args.model_type, args)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.cuda()
 

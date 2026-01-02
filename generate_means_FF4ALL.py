@@ -34,33 +34,33 @@ def main():
     fake_folders = [fold.split('/')[-1] for fold in ff4all_folders if os.path.isdir(fold)]
     real_folders = args.real_folders
 
-    # print("Processing fake folders...")
-    # for folder in tqdm(fake_folders, desc="Fake Folders", leave=True):
-    #     if not os.path.exists(os.path.join(output_dir, folder)):
-    #         os.makedirs(os.path.join(output_dir, folder), exist_ok=True)
-    #     try:
-    #         pattern = os.path.join(args.ff4all_base, '**', folder, '*.png')
-    #         pattern_list = np.unique(glob.glob(pattern, recursive=True))
-    #         np.random.shuffle(pattern_list)
-    #         if len(pattern_list) < mean_size:
-    #             print(f"Not enough images in folder '{folder}' to create mean images. Skipping.")
-    #             continue
-    #         images = np.array([plt.imread(img) for img in pattern_list])
+    print("Processing fake folders...")
+    for folder in tqdm(fake_folders, desc="Fake Folders", leave=True):
+        if not os.path.exists(os.path.join(output_dir, folder)):
+            os.makedirs(os.path.join(output_dir, folder), exist_ok=True)
+        try:
+            pattern = os.path.join(args.ff4all_base, '**', folder, '*.png')
+            pattern_list = np.unique(glob.glob(pattern, recursive=True))
+            np.random.shuffle(pattern_list)
+            if len(pattern_list) < mean_size:
+                print(f"Not enough images in folder '{folder}' to create mean images. Skipping.")
+                continue
+            images = np.array([plt.imread(img) for img in pattern_list])
 
-    #         bar = tqdm(range(num_images), desc=f"Generating means [{folder}]", leave=False)
-    #         for i in bar:
-    #             save_path = os.path.join(output_dir, folder, f'{i}.png')
-    #             if os.path.exists(save_path):
-    #                 bar.set_postfix_str(f"Skipped {i}")
-    #                 continue
+            bar = tqdm(range(num_images), desc=f"Generating means [{folder}]", leave=False)
+            for i in bar:
+                save_path = os.path.join(output_dir, folder, f'{i}.png')
+                if os.path.exists(save_path):
+                    bar.set_postfix_str(f"Skipped {i}")
+                    continue
 
-    #             np.random.shuffle(images)
-    #             img_mean = images[:mean_size].mean(0)
+                np.random.shuffle(images)
+                img_mean = images[:mean_size].mean(0)
 
-    #             plt.imsave(save_path, img_mean)
-    #             bar.set_postfix_str(f"Saved {i}")
-    #     except Exception as e:
-    #         print(f"Error processing folder '{folder}': {e}")
+                plt.imsave(save_path, img_mean)
+                bar.set_postfix_str(f"Saved {i}")
+        except Exception as e:
+            print(f"Error processing folder '{folder}': {e}")
 
     print("Processing real folders...")
     for folder in tqdm(real_folders, desc="Real Folders", leave=True):

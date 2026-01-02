@@ -1,12 +1,12 @@
 import os
 from glob import glob
+import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
 import random
 import io
 import numpy as np
-import pdb
 import cv2
 import constants as c
 from collections import Counter
@@ -14,7 +14,88 @@ from random import choices
 import pandas as pd
 
 DATA_DIR = "/media/orazio_mattia_group/ad4dd"
-CSV_PATH = '/media/orazio_mattia_group/ad4dd/dataset_split.csv'
+CSV_PATH = '/media/orazio_mattia_group/ad4dd/dataset_split_rand.csv'
+
+
+def create_image_transform(input_size, use_fourier=False, is_train=False, use_augs=True):
+    """
+    Helper function to create image transform pipeline.
+    
+    Args:
+        input_size: Target image size
+        use_fourier: Whether to use Fourier transform
+        is_train: Whether this is for training (enables augmentations)
+    
+    Returns:
+        torchvision.transforms.Compose object
+    """
+    if use_fourier:
+        return transforms.Compose([transforms.ToTensor()])
+    
+    if is_train and use_augs:
+        AUGMENTATION_POOL = [
+            transforms.RandomApply([transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15, hue=0.03)], p=0.5),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomApply([transforms.RandomResizedCrop(input_size, scale=(0.92, 1.0), ratio=(0.95, 1.05))], p=0.5),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5))], p=0.5),
+            transforms.RandomApply([transforms.RandomRotation(degrees=5)], p=0.5),
+        ]
+        return transforms.Compose([
+            transforms.Resize(input_size),
+            RandomApplyAugmentations(AUGMENTATION_POOL, min_augs=1, max_augs=2) if use_augs else transforms.ToTensor(),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+    else:
+        return transforms.Compose([
+            transforms.Resize(input_size),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+
+
+def filter_files_by_csv_split(image_files, is_train, is_val=False):
+    """
+    Helper function to filter image files based on CSV split.
+    
+    Args:
+        image_files: Array of image file paths
+        is_train: Whether this is training data
+        is_val: Whether this is validation data (only used if is_train=True)
+    
+    Returns:
+        Filtered array of image file paths
+    """
+    guidance = pd.read_csv(CSV_PATH)
+    
+    if is_train:
+        split_name = 'val' if is_val else 'train'
+        guidance = guidance[guidance['split'] == split_name]
+    else:
+        guidance = guidance[guidance['split'] == 'test']
+    
+    allowed = guidance['path'].to_list()
+    mask = np.isin(image_files, allowed)
+    return image_files[mask]
+
+
+class RandomApplyAugmentations(torch.nn.Module):
+    """
+    Randomly applies a random subset of augmentations from a given list.
+    """
+    def __init__(self, augmentations, min_augs=1, max_augs=None):
+        super().__init__()
+        self.augmentations = augmentations
+        self.min_augs = min_augs
+        self.max_augs = max_augs if max_augs is not None else len(augmentations)
+
+    def forward(self, img):
+        num_augs = random.randint(self.min_augs, self.max_augs)
+        augs = random.sample(self.augmentations, num_augs)
+        for aug in augs:
+            img = aug(img)
+        return img
+
 
 class Dataset:
     def __init__(self, 
@@ -22,11 +103,13 @@ class Dataset:
     reals_name,
     input_size=(224,224), 
     is_train=True,  
+    is_val=False,
     use_fourier=True, 
     test_name="forenSynth",
     reals=None,
     attack_type='none',
-    attack_params=None
+    attack_params=None,
+    use_augs=True
     ):
         """
         Factory class to create dataset instances based on the dataset name.
@@ -39,11 +122,13 @@ class Dataset:
         self.reals_name = reals_name
         self.test_name = test_name  
         self.is_train = is_train
+        self.is_val = is_val
         self.input_size = input_size
         self.use_fourier = use_fourier
         self.attack_type = attack_type
         self.attack_params = attack_params if attack_params is not None else {}
-
+        self.use_augs = use_augs
+        
     def create_dataset(self):
         if self.dataset_name == "FF++":            # TODO: sistemare patterns
             root_dir = f"{c.DATA_DIR}/dataset/train/FF++/real" if self.is_train else f"{c.DATA_DIR}/dataset/train/FF++/"
@@ -57,15 +142,17 @@ class Dataset:
                 is_train=self.is_train,
                 use_fourier=self.use_fourier,
                 attack_type=self.attack_type,
-                attack_params=self.attack_params
+                attack_params=self.attack_params,
+                use_augs=self.use_augs,
             )
 
         elif self.dataset_name == 'FF4ALL':
             if self.reals_name == 'ffhq':
-                test_folders = ['014000', '022000']
-                # root_dir = [f"{c.DATA_DIR}/ffhq/*"] if self.is_train \
-                root_dir = [f"{c.DATA_DIR}/ffhq/{fol}" for fol in os.listdir(f"{c.DATA_DIR}/ffhq") if fol not in test_folders] if self.is_train \
-                            else [f"{c.DATA_DIR}/ffhq/{fol}" for fol in test_folders] + [f"{c.DATA_DIR}/FF4ALL/**/**"]
+                # test_folders = ['014000', '022000']
+                # root_dir = [f"{c.DATA_DIR}/ffhq/{fol}" for fol in os.listdir(f"{c.DATA_DIR}/ffhq") if fol not in test_folders] if self.is_train \
+                #             else [f"{c.DATA_DIR}/ffhq/{fol}" for fol in test_folders] + [f"{c.DATA_DIR}/FF4ALL/**/**"]
+                root_dir = [f"{c.DATA_DIR}/ffhq/*"] if self.is_train \
+                            else [f"{c.DATA_DIR}/ffhq/*"] + [f"{c.DATA_DIR}/FF4ALL/**/**"]
                 file_pattern = "*.png" 
             elif self.reals_name == 'celeba_hq':
                 root_dir = [f"{c.DATA_DIR}/celeba_hq/train/*"] if self.is_train else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/FF4ALL/*"]
@@ -87,9 +174,11 @@ class Dataset:
                 input_size=self.input_size,
                 use_valid=True,
                 is_train=self.is_train,
+                is_val=self.is_val,
                 use_fourier=self.use_fourier,
                 attack_type=self.attack_type,
-                attack_params=self.attack_params
+                attack_params=self.attack_params,
+                use_augs=self.use_augs,
             )
             
         elif self.dataset_name == 'progan':
@@ -109,15 +198,15 @@ class Dataset:
                 input_size=self.input_size,
                 use_valid=False,
                 is_train=self.is_train,
-                use_fourier=self.use_fourier,
+                use_fourier=self.use_fourier
             )
 
         else:
             raise ValueError(f"Unsupported dataset: {self.dataset_name}")
 
 class DeepFakeDataset(Dataset):
-    def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, 
-                 use_valid=False, use_fourier=False, attack_type='none', attack_params=None, seed=124):
+    def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, is_val=False,
+                 use_valid=False, use_fourier=False, attack_type='none', attack_params=None, seed=124, use_augs=True):
         """
         Args:
             root_dir (str): Path to the root folder containing image data.
@@ -133,27 +222,15 @@ class DeepFakeDataset(Dataset):
             **(attack_params if attack_params is not None else {})
         )
         
-        if use_fourier:
-            self.image_transform = transforms.Compose([transforms.ToTensor()])
-        else:
-            if is_train:
-                self.image_transform = transforms.Compose([
-                    transforms.Resize(input_size),
-                    transforms.RandomHorizontalFlip(p=0.5),
-                    # transforms.RandomResizedCrop(input_size, scale=(0.95, 1.0), ratio=(0.95, 1.05)),
-                    transforms.ToTensor(),
-                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-                ])
-            else:
-                self.image_transform = transforms.Compose([
-                    transforms.Resize(input_size),
-                    transforms.ToTensor(),
-                    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-                ])
+        self.image_transform = create_image_transform(input_size, use_fourier, is_train, use_augs)
 
         file_pattern = file_pattern 
         self.image_files = [np.unique(np.array(glob(os.path.join(r, file_pattern), recursive=True))) for r in root_dir]
         self.image_files = np.concatenate(self.image_files)
+
+        # Filter files based on CSV split
+        self.image_files = filter_files_by_csv_split(self.image_files, is_train, is_val)
+
 
         self.is_train = is_train
         self.use_fourier = use_fourier
@@ -400,12 +477,13 @@ class DeepFakeDataset_w_celeba(Dataset):
     
 
 class DeepFakeDatasetSota(Dataset):
-    def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, use_valid=False, use_fourier=False):
+    def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, use_valid=False, use_fourier=False, seed=124):
         """
         Args:
             root_dir (str): Path to the root folder containing image data.
             input_size (tuple): Size for resizing images.
             is_train (bool): Flag to indicate if the dataset is for training or testing.
+            seed: Random seed for reproducibility
         """
         self.image_transform = transforms.Compose([transforms.ToPILImage(), transforms.Resize(384), transforms.ToTensor(), transforms.Normalize([0.0], [1.0]),]) if use_fourier else transforms.Compose([
             transforms.Resize(input_size),
@@ -586,12 +664,7 @@ class DeepFakeDataset_multi_class(Dataset):
         self.image_files = np.concatenate(self.image_files)
 
         if is_train:
-            guidance = pd.read_csv(CSV_PATH)
-            guidance = guidance[guidance['split']==('val' if is_val else 'train')]
-            allowed = guidance['path'].to_list()
-
-            mask = np.isin(self.image_files, allowed)
-            self.image_files = self.image_files[mask]
+            self.image_files = filter_files_by_csv_split(self.image_files, is_train, is_val)
 
         self.use_fourier = use_fourier
         self.classes = np.unique([f.split("/")[-2] for f in self.image_files if (f.split("/")[-3] != "ffhq" and f.split("/")[-4] != "celeba_hq")])
