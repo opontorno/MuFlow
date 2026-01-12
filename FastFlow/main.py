@@ -42,7 +42,7 @@ def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last
         input_size=config["input_size"],
         is_train=is_train,
         is_val=is_val,
-        use_fourier=False,
+        use_fourier=True if args.use_fourier == 1 else False,
         use_augs=True if args.use_augs == 1 else False
     ).create_dataset()
     
@@ -74,7 +74,7 @@ def build_test_data_loader(args, config):
 
 def build_model(config, model_type, args):
     
-    gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_fourier_{args.reals}_{config['input_size']}.npy" if args.use_fourier \
+    gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_fourier_{args.reals}_{config['input_size']}.npy" if args.use_fourier == 1 \
                 else f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_{args.reals}_{config['input_size']}.npy"
     
     gmm_values = np.load(gmm_parameters, allow_pickle=True).item() 
@@ -84,11 +84,11 @@ def build_model(config, model_type, args):
         model = fastflow.FastFlow(
             backbone_name=config["backbone_name"],
             flow_steps=config["flow_step"],
-            input_size=384 if args.use_fourier else config["input_size"],
+            input_size=config["input_size"],
             conv3x3_only=config["conv3x3_only"],
             hidden_ratio=config["hidden_ratio"],
             gmm_values=gmm_values,
-            in_channels=1 if args.use_fourier else 3,
+            in_channels=3,  # Always 3 channels (RGB or replicated Fourier magnitude)
             backbone_weights=args.backbone_weights
         )
         print(
@@ -468,8 +468,8 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, help="path to load checkpoint")
 
     parser.add_argument('--wandb', default= 'disabled', choices=['online', 'offline', 'disabled'])
-    parser.add_argument('--use_augs', type=int, default=1, choices=[0, 1], help="Whether to use data augmentation")
-    parser.add_argument('--use_fourier', action='store_true')
+    parser.add_argument('--use_augs', type=int, default=0, choices=[0, 1], help="Whether to use data augmentation")
+    parser.add_argument('--use_fourier', type=int, default=0, choices=[0, 1], help="Whether to use Fourier transform")
     parser.add_argument('--run_name', type=str)
     parser.add_argument('--model_type', type=str, choices=['FastFlow', 'VAE'], default='FastFlow', help="Choose the model to train")
     parser.add_argument('--eval_interval', type=int, default=1)
@@ -503,7 +503,10 @@ if __name__ == "__main__":
     print(args)
 
     if args.run_name is None:
-        args.run_name = f"{args.data}_{args.reals}_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}_ld{args.lr_decay}_lp{args.lr_patience}"
+        args.run_name = f"{args.data}_{args.reals}"
+        if args.use_fourier == 1:
+            args.run_name += "_fourier"
+        args.run_name += f"_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}_ld{args.lr_decay}_lp{args.lr_patience}"
         if args.use_lof == 1:
             args.run_name += "_lof"
         if args.use_percentile == 1:

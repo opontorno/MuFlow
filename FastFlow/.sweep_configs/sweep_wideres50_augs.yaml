@@ -1,5 +1,5 @@
 method: bayes
-name: validation_threshold_dense121 #_w/augs
+name: validation_threshold_wide_resnet50_2_w/augs
 metric:
   name: best_accuracy
   goal: maximize
@@ -13,7 +13,7 @@ parameters:
   reals:
     value: ffhq
   config:
-    value: configs/densenet121.yaml
+    value: configs/wide_resnet50_2.yaml
   model_type:
     value: FastFlow
   num_epochs:
@@ -23,6 +23,8 @@ parameters:
   early_stopping_patience:
     value: 50
   use_augs:
+    value: 1
+  use_fourier:
     value: 0
   
   # Hyperparameters to optimize

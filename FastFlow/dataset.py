@@ -21,17 +21,28 @@ def create_image_transform(input_size, use_fourier=False, is_train=False, use_au
     """
     Helper function to create image transform pipeline.
     
+    Pipeline structure:
+        1. Resize
+        2. Augmentations (if is_train and use_augs)
+        3. Fourier transform (if use_fourier)
+        4. ToTensor
+        5. Normalize (if NOT use_fourier)
+    
     Args:
         input_size: Target image size
         use_fourier: Whether to use Fourier transform
         is_train: Whether this is for training (enables augmentations)
+        use_augs: Whether to use data augmentations (only if is_train=True)
     
     Returns:
         torchvision.transforms.Compose object
     """
-    if use_fourier:
-        return transforms.Compose([transforms.ToTensor()])
+    pipeline = []
     
+    # 1. Always start with Resize
+    pipeline.append(transforms.Resize(input_size))
+    
+    # 2. Add augmentations if training and use_augs is enabled
     if is_train and use_augs:
         AUGMENTATION_POOL = [
             transforms.RandomApply([transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.15, hue=0.03)], p=0.5),
@@ -40,18 +51,20 @@ def create_image_transform(input_size, use_fourier=False, is_train=False, use_au
             transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5))], p=0.5),
             transforms.RandomApply([transforms.RandomRotation(degrees=5)], p=0.5),
         ]
-        return transforms.Compose([
-            transforms.Resize(input_size),
-            RandomApplyAugmentations(AUGMENTATION_POOL, min_augs=1, max_augs=2) if use_augs else transforms.ToTensor(),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-    else:
-        return transforms.Compose([
-            transforms.Resize(input_size),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
+        pipeline.append(RandomApplyAugmentations(AUGMENTATION_POOL, min_augs=1, max_augs=2))
+    
+    # 3. Add Fourier transform if enabled
+    if use_fourier:
+        pipeline.append(FourierMagnitudeTransform())
+    
+    # 4. Always convert to tensor
+    pipeline.append(transforms.ToTensor())
+    
+    # 5. Add normalization only if NOT using Fourier (Fourier is already normalized)
+    if not use_fourier:
+        pipeline.append(transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))
+    
+    return transforms.Compose(pipeline)
 
 
 def filter_files_by_csv_split(image_files, is_train, is_val=False):
@@ -180,26 +193,6 @@ class Dataset:
                 attack_params=self.attack_params,
                 use_augs=self.use_augs,
             )
-            
-        elif self.dataset_name == 'progan':
-            if self.test_name == "forenSynth":
-                test_dir = f"{c.DATA_DIR}/datasets_sota_spectrum_256/test/forenSynths/**/**/" if self.use_fourier else f"{c.DATA_DIR}/datasets_sota/test/forenSynths/**/**/"
-            elif self.test_name == "DiffusionForensics":
-                test_dir = f"{c.DATA_DIR}/datasets_sota_spectrum_256/test/DiffusionForensics/**/**/**" if self.use_fourier else f"{c.DATA_DIR}/datasets_sota/test/DiffusionForensics/**/**/**"
-            
-            train_dir = f"{c.DATA_DIR}/datasets_sota_spectrum_256/train/**/0_real/" if self.use_fourier else f"{c.DATA_DIR}/datasets_sota/train/**/0_real/"
-            root_dir = train_dir if self.is_train else test_dir
-            
-            file_pattern = "*.npy" if self.use_fourier else "*.[pj][pn]g"
-        
-            return DeepFakeDatasetSota(
-                root_dir=root_dir,
-                file_pattern=file_pattern,
-                input_size=self.input_size,
-                use_valid=False,
-                is_train=self.is_train,
-                use_fourier=self.use_fourier
-            )
 
         else:
             raise ValueError(f"Unsupported dataset: {self.dataset_name}")
@@ -263,13 +256,14 @@ class DeepFakeDataset(Dataset):
         image_file = self.image_files[index]
         label = self.labels[index]
 
-        # image = np.load(image_file) if self.use_fourier else Image.open(image_file).convert("RGB")
-
-        if self.use_fourier:
-            image = np.load(image_file)
-        else:
-            image = Image.open(image_file).convert("RGB")
+        # Load image as RGB (Fourier transform applied in pipeline if use_fourier=True)
+        image = Image.open(image_file).convert("RGB")
+        
+        # Apply robustness attacks only in test mode and if not using Fourier
+        if not self.is_train and not self.use_fourier:
             image = self.attack.apply(image)
+        
+        # Apply transforms (includes Fourier if use_fourier=True)
         image = self.image_transform(image).float()
         
         if self.is_train:
@@ -381,7 +375,7 @@ class Dataset_celeba:
 
 class DeepFakeDataset_w_celeba(Dataset):
     def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, 
-                 use_valid=False, use_fourier=False, attack_type='none', attack_params=None, seed=124):
+                 use_valid=False, use_fourier=False, attack_type='none', attack_params=None, seed=124, use_augs=True):
         """
         Args:
             root_dir (str): Path to the root folder containing image data.
@@ -397,11 +391,7 @@ class DeepFakeDataset_w_celeba(Dataset):
             **(attack_params if attack_params is not None else {})
         )
         
-        self.image_transform = transforms.Compose([transforms.ToTensor()]) if use_fourier else transforms.Compose([
-            transforms.Resize(input_size),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
+        self.image_transform = create_image_transform(input_size, use_fourier, is_train, use_augs)
 
         # Collect all image paths recursively
         file_pattern = file_pattern 
@@ -457,247 +447,20 @@ class DeepFakeDataset_w_celeba(Dataset):
         image_file = self.image_files[index]
         label = self.labels[index]
 
-        # image = np.load(image_file) if self.use_fourier else Image.open(image_file).convert("RGB")
-
-        if self.use_fourier:
-            image = np.load(image_file)
-        else:
-            image = Image.open(image_file).convert("RGB")
+        # Load image as RGB (Fourier transform applied in pipeline if use_fourier=True)
+        image = Image.open(image_file).convert("RGB")
+        
+        # Apply robustness attacks only in test mode and if not using Fourier
+        if not self.is_train and not self.use_fourier:
             image = self.attack.apply(image)
+        
+        # Apply transforms (includes Fourier if use_fourier=True)
         image = self.image_transform(image).float()
         
         if self.is_train:
             return image
         else:
             return image, label
-
-    def __len__(self):
-        return len(self.image_files)
-    
-    
-
-class DeepFakeDatasetSota(Dataset):
-    def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, use_valid=False, use_fourier=False, seed=124):
-        """
-        Args:
-            root_dir (str): Path to the root folder containing image data.
-            input_size (tuple): Size for resizing images.
-            is_train (bool): Flag to indicate if the dataset is for training or testing.
-            seed: Random seed for reproducibility
-        """
-        self.image_transform = transforms.Compose([transforms.ToPILImage(), transforms.Resize(384), transforms.ToTensor(), transforms.Normalize([0.0], [1.0]),]) if use_fourier else transforms.Compose([
-            transforms.Resize(input_size),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-
-        # Collect all image paths recursively
-        file_pattern = file_pattern 
-        self.image_files = np.unique(np.array(glob(os.path.join(root_dir, file_pattern), recursive=True)))
-        random.seed(seed)  # Ensures reproducibility
-        random.shuffle(self.image_files)
-        # random.shuffle(self.image_files)
-        # self.image_files = self.image_files[:100]
-        
-        # Split into 90% train and 10% test if "FF++" is in the root directory path
-        if use_valid:
-            random.seed(seed)  # Ensures reproducibility
-            random.shuffle(self.image_files)
-            split_idx = int(0.9 * len(self.image_files))
-            train_files = self.image_files[:split_idx]
-            test_files = self.image_files[split_idx:]
-            self.image_files = train_files if is_train else test_files
-
-        self.is_train = is_train
-        self.use_fourier = use_fourier
-        self.classes = np.unique([f.split("/")[7] for f in self.image_files if not is_train])
-        
-        self.class_to_idx = {cls: idx + 1 for idx, cls in enumerate(self.classes)}
-
-    def __getitem__(self, index):
-        image_file = self.image_files[index]
-        
-        image = np.load(image_file) if self.use_fourier else Image.open(image_file).convert("RGB").resize([256,256])
-        
-        image = self.image_transform(image).float()
-        
-        if self.is_train:
-            return image
-        else:
-            
-            label = 0 if "0_real" in image_file else self.class_to_idx[image_file.split("/")[7]]
-            return image, label
-
-    def __len__(self):
-        return len(self.image_files)
-
-
-class Dataset_multi_class:
-    def __init__(self, 
-    dataset_name, 
-    reals_name,
-    input_size=(224,224), 
-    is_train=True,  
-    is_val=False,
-    use_fourier=True, 
-    test_name="forenSynth",
-    reals=None,
-    attack_type='none',
-    attack_params=None
-    ):
-        """
-        Factory class to create dataset instances based on the dataset name.
-
-        Args:
-            dataset_name (str): Name of the dataset to create.
-            is_train (bool): Flag indicating if the dataset is for training or testing.
-        """
-        self.dataset_name = dataset_name
-        self.reals_name = reals_name
-        self.test_name = test_name  
-        self.is_train = is_train
-        self.is_val = is_val
-        self.input_size = input_size
-        self.use_fourier = use_fourier
-        self.attack_type = attack_type
-        self.attack_params = attack_params if attack_params is not None else {}
-
-        self.train_fakes = ['StyleGAN', 'Flux.1.1 Pro']
-
-    def create_dataset(self):
-        if self.dataset_name == "FF++":            # TODO: sistemare patterns
-            root_dir = f"{c.DATA_DIR}/dataset/train/FF++/real" if self.is_train else f"{c.DATA_DIR}/dataset/train/FF++/"
-            file_pattern = "**/c23/frames_spectrum_256/**/magnitude*.npy" if self.use_fourier else "**/c23/frames/**/*.png"
-
-            return DeepFakeDataset(
-                root_dir=root_dir,
-                file_pattern=file_pattern,
-                input_size=self.input_size,
-                use_valid=True,
-                is_train=self.is_train,
-                use_fourier=self.use_fourier,
-                attack_type=self.attack_type,
-                attack_params=self.attack_params
-            )
-
-        elif self.dataset_name == 'FF4ALL':
-            if self.reals_name == 'ffhq':
-                test_folders = ['014000', '022000']
-                train_fake_folsers = self.train_fakes
-                root_dir = [f"{DATA_DIR}/ffhq/{fol}" for fol in os.listdir(f"{DATA_DIR}/ffhq") if fol not in test_folders] + [f"{DATA_DIR}/FF4ALL/**/{fol}" for fol in train_fake_folsers] if self.is_train \
-                            else [f"{DATA_DIR}/ffhq/{fol}" for fol in test_folders] + [f"{DATA_DIR}/FF4ALL/**/{fol}" for fol in os.listdir(f"{DATA_DIR}/FF4ALL/Closed Set")+os.listdir(f"{DATA_DIR}/FF4ALL/Open Set") if fol not in train_fake_folsers]
-                file_pattern = "*.png" 
-            elif self.reals_name == 'celeba_hq':
-                train_fake_folsers = self.train_fakes
-                root_dir = [f"{DATA_DIR}/celeba_hq/train/*"] + [f"{DATA_DIR}/FF4ALL/**/{fol}" for fol in train_fake_folsers] if self.is_train \
-                            else [f"{DATA_DIR}/celeba_hq/val/*"] + [f"{DATA_DIR}/FF4ALL/**/{fol}" for fol in os.listdir(f"{DATA_DIR}/FF4ALL/Closed Set")+os.listdir(f"{DATA_DIR}/FF4ALL/Open Set") if fol not in train_fake_folsers]
-                file_pattern = "**/*.*g" 
-            #########################################################check effectivness#############################
-            elif self.reals_name == 'ffhq+celeba_hq':
-                root_dir = [f"{DATA_DIR}/ffhq", f"{DATA_DIR}/celeba_hq/*"] if self.is_train else [f"{DATA_DIR}/ffhq", f"{DATA_DIR}/celeba_hq/*", f"{DATA_DIR}/FF4ALL/*"]
-                file_pattern = "**/*" 
-            ###################################################################################################
-
-            print(f'train fake folders: {self.train_fakes}')
-            
-            return DeepFakeDataset_multi_class(
-                root_dir=root_dir,
-                file_pattern=file_pattern,
-                input_size=self.input_size,
-                is_train=self.is_train,
-                is_val=self.is_val,
-                use_fourier=self.use_fourier,
-                attack_type=self.attack_type,
-                attack_params=self.attack_params
-            )
-            
-        elif self.dataset_name == 'progan':
-            if self.test_name == "forenSynth":
-                test_dir = f"{c.DATA_DIR}/datasets_sota_spectrum_256/test/forenSynths/**/**/" if self.use_fourier else f"{c.DATA_DIR}/datasets_sota/test/forenSynths/**/**/"
-            elif self.test_name == "DiffusionForensics":
-                test_dir = f"{c.DATA_DIR}/datasets_sota_spectrum_256/test/DiffusionForensics/**/**/**" if self.use_fourier else f"{c.DATA_DIR}/datasets_sota/test/DiffusionForensics/**/**/**"
-            
-            train_dir = f"{c.DATA_DIR}/datasets_sota_spectrum_256/train/**/0_real/" if self.use_fourier else f"{c.DATA_DIR}/datasets_sota/train/**/0_real/"
-            root_dir = train_dir if self.is_train else test_dir
-            
-            file_pattern = "*.npy" if self.use_fourier else "*.[pj][pn]g"
-        
-            return DeepFakeDatasetSota(
-                root_dir=root_dir,
-                file_pattern=file_pattern,
-                input_size=self.input_size,
-                use_valid=False,
-                is_train=self.is_train,
-                use_fourier=self.use_fourier,
-            )
-
-        else:
-            raise ValueError(f"Unsupported dataset: {self.dataset_name}")
-
-
-class DeepFakeDataset_multi_class(Dataset):
-    def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, 
-                 is_val=False, use_fourier=True, attack_type='none', attack_params=None, seed=124):
-        """
-        Args:
-            root_dir (str): Path to the root folder containing image data.
-            input_size (tuple): Size for resizing images.
-            is_train (bool): Flag to indicate if the dataset is for training or testing.
-        """
-
-        random.seed(seed)
-        np.random.seed(seed)
-
-        self.attack = RobustnessAttacks(
-            attack_type=attack_type if not is_train else 'none',  # Attacchi solo in test
-            **(attack_params if attack_params is not None else {})
-        )
-
-        self.image_transform = transforms.Compose([transforms.ToTensor()]) if use_fourier else transforms.Compose([
-            transforms.Resize(input_size),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ])
-
-        # Collect all image paths recursively
-        self.image_files = [np.unique(np.array(glob(os.path.join(r, file_pattern), recursive=True))) for r in root_dir]
-        self.image_files = np.concatenate(self.image_files)
-
-        if is_train:
-            self.image_files = filter_files_by_csv_split(self.image_files, is_train, is_val)
-
-        self.use_fourier = use_fourier
-        self.classes = np.unique([f.split("/")[-2] for f in self.image_files if (f.split("/")[-3] != "ffhq" and f.split("/")[-4] != "celeba_hq")])
-        self.class_to_idx = {cls: idx + 1 for idx, cls in enumerate(self.classes)}
-        self.labels = [0 if ("ffhq" in image_file or "celeba_hq" in image_file) else self.class_to_idx[image_file.split("/")[-2]] for image_file in self.image_files]
-        # self.labels = [0 if ("ffhq" in image_file or "celeba_hq" in image_file) else 1 for image_file in self.image_files]
-
-        # self.labels = [0 if ("ffhq" in image_file or "celeba_hq" in image_file) else 1 for image_file in self.image_files]
-        #Balancing test set
-        min_count = min(sum(1 for label in self.labels if label != 0), self.labels.count(0))
-        self.image_files, self.labels = zip(*[item for label in set(self.labels) for item in choices([(img, lbl) for img, lbl in zip(self.image_files, self.labels) if lbl == label], k=(min_count if label == 0 else min_count//len(self.classes)))])
-        # min_count = min(Counter(self.labels).values())
-        # self.image_files, self.labels = zip(*[item for label in set(self.labels) for item in choices([(img, lbl) for img, lbl in zip(self.image_files, self.labels) if lbl == label], k=(min_count))])
-        
-        rng = np.random.RandomState(seed)
-        idx = rng.permutation(len(self.image_files))
-
-        self.image_files = np.array(self.image_files)[idx]
-        self.labels = np.array(self.labels)[idx]
-        
-    def __getitem__(self, index):
-        image_file = self.image_files[index]
-        label = self.labels[index]
-
-        if self.use_fourier:
-            image = np.load(image_file)
-        else:
-            image = Image.open(image_file).convert("RGB")
-            image = self.attack.apply(image)
-        
-        image = self.image_transform(image).float()
-        
-        return image, label
 
     def __len__(self):
         return len(self.image_files)
@@ -844,3 +607,47 @@ class RobustnessAttacks:
             return image.transpose(Image.FLIP_LEFT_RIGHT)
         else:
             raise ValueError("Horizontal flip requires PIL Image")
+
+
+class FourierMagnitudeTransform:
+    """
+    Transform that converts RGB image to Fourier magnitude spectrum.
+    Matches the implementation in analysis_WILD_fourier.py:
+    - Converts RGB to grayscale using standard luminance weights
+    - Computes 2D FFT on grayscale
+    - Returns magnitude spectrum with log scale
+    - Replicates to 3 channels for CNN compatibility
+    """
+    def __init__(self):
+        pass
+    
+    def __call__(self, img):
+        """
+        Args:
+            img: PIL Image or numpy array of shape (H, W, 3)
+        
+        Returns:
+            numpy array of shape (H, W, 3) with Fourier magnitude spectrum
+        """
+        # Convert PIL to numpy if needed
+        if isinstance(img, Image.Image):
+            img = np.array(img)
+        
+        # Convert RGB to grayscale using standard luminance weights
+        # Y = 0.299*R + 0.587*G + 0.114*B
+        gray = 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
+        
+        # Compute 2D FFT on grayscale image
+        f = np.fft.fft2(gray)
+        # Shift zero frequency to center
+        fshift = np.fft.fftshift(f)
+        # Compute magnitude spectrum with log scale
+        magnitude = 20 * np.log(np.abs(fshift) + 1)
+        
+        # Normalize to [0, 255] range
+        magnitude = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8) * 255
+        
+        # Replicate to 3 channels for CNN input (H, W) → (H, W, 3)
+        magnitude_rgb = np.stack([magnitude, magnitude, magnitude], axis=-1)
+        
+        return magnitude_rgb.astype(np.uint8)
