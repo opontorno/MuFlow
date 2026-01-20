@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import constants as const
 
 import numpy as np
+import pdb
 
 
 def gaussian_nll_loss(output, mu, cov, log_jac_det):
@@ -65,6 +66,8 @@ class FastFlow(nn.Module):
         hidden_ratio=1.0,
         gmm_values=None,
         in_channels=3,
+        out_indices=[1, 2, 3],
+        use_proj=False,
     ):
         super(FastFlow, self).__init__()
         assert (
@@ -73,16 +76,14 @@ class FastFlow(nn.Module):
 
         if backbone_name in [const.BACKBONE_CAIT, const.BACKBONE_DEIT]:
             self.feature_extractor = timm.create_model(backbone_name, pretrained=True, in_chans=in_channels)
-            # channels = [768]
-            # scales = [16]
-            channels = self.feature_extractor.feature_info.channels()
-            scales = self.feature_extractor.feature_info.reduction()
+            channels = [768]
+            scales = [16]
         else:
             self.feature_extractor = timm.create_model(
                 backbone_name,
                 pretrained=True,
                 features_only=True,
-                out_indices=[1, 2, 3],
+                out_indices=out_indices,
                 in_chans=in_channels
             )
             if backbone_weights is not None:
@@ -106,6 +107,25 @@ class FastFlow(nn.Module):
 
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
+
+        # Projection layer: Convolutional network with 1x1 convolutions that maintains feature dimensions
+        # Operates on channel dimension, processing each spatial location independently
+        self.use_proj = use_proj
+        if self.use_proj:
+            self.projection_layers = nn.ModuleList()
+            for in_channels in channels:
+                # Convolutional projection: C -> hidden_dim -> C with 1x1 kernels
+                # 1x1 convolutions maintain spatial dimensions while transforming channels
+                hidden_dim = int(in_channels / 2)  # Hidden dimension
+                self.projection_layers.append(
+                    nn.Sequential(
+                        nn.Conv2d(in_channels, hidden_dim, kernel_size=1, bias=True),  # 1x1 conv
+                        nn.ReLU(inplace=True),
+                        nn.Conv2d(hidden_dim, in_channels, kernel_size=1, bias=True)  # 1x1 conv
+                    )
+                )
+        else:
+            self.projection_layers = None
 
         self.nf_flows = nn.ModuleList()
         for in_channels, scale in zip(channels, scales):
@@ -170,6 +190,16 @@ class FastFlow(nn.Module):
         else:
             features = self.feature_extractor(x)
             features = [self.norms[i](feature) for i, feature in enumerate(features)]
+
+        # Apply projection layer (Conv2d) to each feature level if enabled
+        # 1x1 convolutions process each spatial location independently: (B, C, H, W) -> (B, C, H, W)
+        if self.use_proj:
+            projected_features = []
+            for i, feature in enumerate(features):
+                # Apply 1x1 convolutions directly - no reshape needed
+                feature_projected = self.projection_layers[i](feature)  # (B, C, H, W) -> (B, C, H, W)
+                projected_features.append(feature_projected)
+            features = projected_features
 
         loss = []
         outputs = []

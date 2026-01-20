@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageFile
 from sklearn.manifold import TSNE
 from sklearn.mixture import GaussianMixture
+from fourier_utils import calculate_fourier_magnitude_rgb
 
 # Enable loading of truncated images
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -22,47 +23,24 @@ config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 
 # === Model Setup ===
-model = timm.create_model(model_name, pretrained=True, features_only=True, in_chans=3, out_indices=[1, 2, 3])
+out_indices = config.get("out_indices", [1, 2, 3])  # Get from config or default
+print(f"Using out_indices: {out_indices}")
+
+model = timm.create_model(model_name, pretrained=True, features_only=True, in_chans=3, out_indices=out_indices)
 model.eval()
 
 channels = model.feature_info.channels()
 print("Channels: ", channels)
 scales = model.feature_info.reduction()
 print("Scales: ", scales)
+num_layers = len(out_indices)
+print(f"Number of layers: {num_layers}")
 
 # Create output directory for plots
 os.makedirs('.pictures', exist_ok=True)
 
 
 # === Helper Functions ===
-def calculate_fourier_magnitude_rgb(image):
-    """Calculate Fourier magnitude spectrum from RGB image via grayscale conversion.
-    
-    Converts RGB to grayscale using standard luminance weights, then computes FFT
-    on the single grayscale channel and replicates to 3 channels for CNN input.
-    
-    Args:
-        image: numpy array of shape (H, W, 3) with RGB channels
-        
-    Returns:
-        magnitude_rgb: numpy array of shape (H, W, 3) with replicated magnitude spectrum
-    """
-    # Convert RGB to grayscale using standard luminance weights
-    # Y = 0.299*R + 0.587*G + 0.114*B
-    gray = 0.299 * image[:, :, 0] + 0.587 * image[:, :, 1] + 0.114 * image[:, :, 2]
-    
-    # Compute 2D FFT on grayscale image
-    f = np.fft.fft2(gray)
-    # Shift zero frequency to center
-    fshift = np.fft.fftshift(f)
-    # Compute magnitude spectrum with log scale
-    magnitude = 20 * np.log(np.abs(fshift) + 1)
-    
-    # Replicate to 3 channels for CNN input (H, W) → (H, W, 3)
-    magnitude_rgb = np.stack([magnitude, magnitude, magnitude], axis=-1)
-    return magnitude_rgb
-
-
 def get_features(img):
     """Extract features from an image array."""
     img = torch.from_numpy(np.array(img)).permute(2, 0, 1).unsqueeze(0).float()
@@ -76,11 +54,8 @@ def get_features_from_path(path):
     # Load and resize image
     img = np.array(Image.open(path).convert("RGB").resize([config['input_size'], config['input_size']]))
     
-    # Transform to Fourier magnitude domain
+    # Transform to Fourier magnitude domain (returns [0, 1] float32)
     img_fourier = calculate_fourier_magnitude_rgb(img)
-    
-    # Normalize to [0, 255] range for CNN input
-    img_fourier = (img_fourier - img_fourier.min()) / (img_fourier.max() - img_fourier.min() + 1e-8) * 255
     
     # Extract features from Fourier representation
     return get_features(img_fourier)
@@ -134,10 +109,8 @@ def plot_generators_grid_with_fourier(generators_dict, save_path, cols=6, show_f
             img_array = np.array(img.resize([config['input_size'], config['input_size']]))
             
             if show_fourier:
-                # Show Fourier magnitude spectrum
-                img_fourier = calculate_fourier_magnitude_rgb(img_array)
-                # Normalize for visualization
-                img_display = (img_fourier - img_fourier.min()) / (img_fourier.max() - img_fourier.min() + 1e-8)
+                # Show Fourier magnitude spectrum (already [0, 1])
+                img_display = calculate_fourier_magnitude_rgb(img_array)
             else:
                 # Show original image
                 img_display = img_array / 255.0
@@ -189,10 +162,9 @@ def plot_fourier_comparison(generators_dict, save_path, num_samples=6):
             axes[0, idx].set_title(f"{label}\n(Original)", fontsize=10)
             axes[0, idx].axis('off')
             
-            # Fourier magnitude spectrum
+            # Fourier magnitude spectrum (already [0, 1])
             img_fourier = calculate_fourier_magnitude_rgb(img_array)
-            img_fourier_norm = (img_fourier - img_fourier.min()) / (img_fourier.max() - img_fourier.min() + 1e-8)
-            axes[1, idx].imshow(img_fourier_norm)
+            axes[1, idx].imshow(img_fourier)
             axes[1, idx].set_title("Fourier Magnitude", fontsize=10)
             axes[1, idx].axis('off')
             
@@ -206,7 +178,7 @@ def plot_fourier_comparison(generators_dict, save_path, num_samples=6):
     print(f"Saved comparison to {save_path}")
 
 
-def extract_features_by_class(patterns_dict, sample_size=100):
+def extract_features_by_class(patterns_dict, sample_size=100, num_layers=3):
     """Extract features from images grouped by class/generator."""
     features_by_class = {}
     labels = []
@@ -218,7 +190,7 @@ def extract_features_by_class(patterns_dict, sample_size=100):
             continue
         
         sample = random.sample(files, min(sample_size, len(files)))
-        layer_features = {0: [], 1: [], 2: []}
+        layer_features = {i: [] for i in range(num_layers)}
         
         for img_path in sample:
             try:
@@ -239,8 +211,12 @@ def extract_features_by_class(patterns_dict, sample_size=100):
     return features_by_class, labels
 
 
-def plot_tsne_analysis(features_by_class, colors_dict, save_prefix, num_layers=3):
+def plot_tsne_analysis(features_by_class, colors_dict, save_prefix, num_layers=None):
     """Run t-SNE analysis and plot for each feature layer."""
+    if num_layers is None:
+        # Infer from features_by_class
+        num_layers = len(next(iter(features_by_class.values())))
+    
     for layer_idx in range(num_layers):
         print(f"Applying t-SNE for layer {layer_idx}...")
         
@@ -319,7 +295,7 @@ print("\n" + "="*80)
 print("PART 1: Analyzing Single Images in Fourier Magnitude Domain")
 print("="*80 + "\n")
 
-common_path = "/media/orazio_mattia_group/ad4dd/FF4ALL"
+common_path = "/media/orazio_mattia_group/ad4dd/WILD"
 patterns = {}
 
 # Get generators from Closed Set
@@ -357,11 +333,11 @@ plot_generators_grid_with_fourier(generators_dict_single,
 
 # Extract features (from Fourier domain)
 print("Extracting features from Fourier magnitude spectra...")
-features_by_class_single, labels_single = extract_features_by_class(patterns, sample_size=100)
+features_by_class_single, labels_single = extract_features_by_class(patterns, sample_size=100, num_layers=num_layers)
 
 # Run t-SNE analysis and plot
 print("Running t-SNE analysis on Fourier features...")
-plot_tsne_analysis(features_by_class_single, colors, f'analysis-{model_name}_fourier_tsne_single')
+plot_tsne_analysis(features_by_class_single, colors, f'analysis-{model_name}_fourier_tsne_single', num_layers=num_layers)
 
 
 # ============================================================================
@@ -371,7 +347,7 @@ print("\n" + "="*80)
 print("PART 2: Analyzing Mean Images in Fourier Magnitude Domain")
 print("="*80 + "\n")
 
-common_path_means = "/media/orazio_mattia_group/ad4dd/FF4ALL_means/500"
+common_path_means = "/media/orazio_mattia_group/ad4dd/WILD_means/500"
 patterns_means = {}
 
 if os.path.exists(common_path_means):
@@ -392,11 +368,11 @@ plot_generators_grid_with_fourier(generators_dict_means,
 
 # Extract features from mean images (in Fourier domain)
 print("Extracting features from Fourier magnitude spectra of mean images...")
-features_by_class_means, labels_means = extract_features_by_class(patterns_means, sample_size=100)
+features_by_class_means, labels_means = extract_features_by_class(patterns_means, sample_size=100, num_layers=num_layers)
 
 # Run t-SNE analysis and plot
 print("Running t-SNE analysis on Fourier features of mean images...")
-plot_tsne_analysis(features_by_class_means, colors, f'analysis-{model_name}_fourier_tsne_means')
+plot_tsne_analysis(features_by_class_means, colors, f'analysis-{model_name}_fourier_tsne_means', num_layers=num_layers)
 
 print("\n" + "="*80)
 print("Fourier Analysis complete! All plots saved to .pictures/ folder")

@@ -1,4 +1,4 @@
-import os
+import os, sys
 from glob import glob
 import torch
 from torch.utils.data import Dataset
@@ -12,6 +12,12 @@ import constants as c
 from collections import Counter
 from random import choices
 import pandas as pd
+import pdb
+
+# Add parent directory to path to import fourier_utils
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from fourier_utils import FourierMagnitudeTransform, ToTensorNoScale
+
 
 DATA_DIR = "/media/orazio_mattia_group/ad4dd"
 CSV_PATH = '/media/orazio_mattia_group/ad4dd/dataset_split_rand.csv'
@@ -56,12 +62,10 @@ def create_image_transform(input_size, use_fourier=False, is_train=False, use_au
     # 3. Add Fourier transform if enabled
     if use_fourier:
         pipeline.append(FourierMagnitudeTransform())
-    
-    # 4. Always convert to tensor
-    pipeline.append(transforms.ToTensor())
-    
-    # 5. Add normalization only if NOT using Fourier (Fourier is already normalized)
-    if not use_fourier:
+        pipeline.append(ToTensorNoScale())
+    else:
+        # Use standard ToTensor for RGB (converts [0,255] → [0,1])
+        pipeline.append(transforms.ToTensor())
         pipeline.append(transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))
     
     return transforms.Compose(pipeline)
@@ -159,20 +163,20 @@ class Dataset:
                 use_augs=self.use_augs,
             )
 
-        elif self.dataset_name == 'FF4ALL':
+        elif self.dataset_name == 'WILD':
             if self.reals_name == 'ffhq':
                 # test_folders = ['014000', '022000']
                 # root_dir = [f"{c.DATA_DIR}/ffhq/{fol}" for fol in os.listdir(f"{c.DATA_DIR}/ffhq") if fol not in test_folders] if self.is_train \
-                #             else [f"{c.DATA_DIR}/ffhq/{fol}" for fol in test_folders] + [f"{c.DATA_DIR}/FF4ALL/**/**"]
+                #             else [f"{c.DATA_DIR}/ffhq/{fol}" for fol in test_folders] + [f"{c.DATA_DIR}/WILD/**/**"]
                 root_dir = [f"{c.DATA_DIR}/ffhq/*"] if self.is_train \
-                            else [f"{c.DATA_DIR}/ffhq/*"] + [f"{c.DATA_DIR}/FF4ALL/**/**"]
+                            else [f"{c.DATA_DIR}/ffhq/*"] + [f"{c.DATA_DIR}/WILD/**/**"]
                 file_pattern = "*.png" 
             elif self.reals_name == 'celeba_hq':
-                root_dir = [f"{c.DATA_DIR}/celeba_hq/train/*"] if self.is_train else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/FF4ALL/*"]
+                root_dir = [f"{c.DATA_DIR}/celeba_hq/train/*"] if self.is_train else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/WILD/*"]
                 file_pattern = "**/*.*g" 
             #########################################################check effectivness#############################
             elif self.reals_name == 'ffhq+celeba_hq':
-                root_dir = [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*"] if self.is_train else [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*", f"{c.DATA_DIR}/FF4ALL/*"]
+                root_dir = [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*"] if self.is_train else [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*", f"{c.DATA_DIR}/WILD/*"]
                 file_pattern = "**/*" 
             ###################################################################################################
 
@@ -319,18 +323,18 @@ class Dataset_celeba:
                 attack_params=self.attack_params
             )
 
-        elif self.dataset_name == 'FF4ALL':
+        elif self.dataset_name == 'WILD':
             if self.reals_name == 'ffhq':
                 test_folders = ['014000', '022000']
                 root_dir = [f"{c.DATA_DIR}/ffhq/{fol}" for fol in os.listdir(f"{c.DATA_DIR}/ffhq") if fol not in test_folders] if self.is_train \
-                            else [f"{c.DATA_DIR}/celeba_hq/val/*/**"] + [f"{c.DATA_DIR}/FF4ALL/**/**"] + [f"{c.DATA_DIR}/ffhq/{fol}" for fol in test_folders] 
+                            else [f"{c.DATA_DIR}/celeba_hq/val/*/**"] + [f"{c.DATA_DIR}/WILD/**/**"] + [f"{c.DATA_DIR}/ffhq/{fol}" for fol in test_folders] 
                 file_pattern = "*.*g"
             elif self.reals_name == 'celeba_hq':
-                root_dir = [f"{c.DATA_DIR}/celeba_hq/train/*"] if self.is_train else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/FF4ALL/*"]
+                root_dir = [f"{c.DATA_DIR}/celeba_hq/train/*"] if self.is_train else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/WILD/*"]
                 file_pattern = "**/*.*g" 
             #########################################################check effectivness#############################
             elif self.reals_name == 'ffhq+celeba_hq':
-                root_dir = [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*"] if self.is_train else [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*", f"{c.DATA_DIR}/FF4ALL/*"]
+                root_dir = [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*"] if self.is_train else [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*", f"{c.DATA_DIR}/WILD/*"]
                 file_pattern = "**/*" 
             ###################################################################################################
 
@@ -348,26 +352,6 @@ class Dataset_celeba:
                 use_fourier=self.use_fourier,
                 attack_type=self.attack_type,
                 attack_params=self.attack_params
-            )
-            
-        elif self.dataset_name == 'progan':
-            if self.test_name == "forenSynth":
-                test_dir = f"{c.DATA_DIR}/datasets_sota_spectrum_256/test/forenSynths/**/**/" if self.use_fourier else f"{c.DATA_DIR}/datasets_sota/test/forenSynths/**/**/"
-            elif self.test_name == "DiffusionForensics":
-                test_dir = f"{c.DATA_DIR}/datasets_sota_spectrum_256/test/DiffusionForensics/**/**/**" if self.use_fourier else f"{c.DATA_DIR}/datasets_sota/test/DiffusionForensics/**/**/**"
-            
-            train_dir = f"{c.DATA_DIR}/datasets_sota_spectrum_256/train/**/0_real/" if self.use_fourier else f"{c.DATA_DIR}/datasets_sota/train/**/0_real/"
-            root_dir = train_dir if self.is_train else test_dir
-            
-            file_pattern = "*.npy" if self.use_fourier else "*.[pj][pn]g"
-        
-            return DeepFakeDatasetSota(
-                root_dir=root_dir,
-                file_pattern=file_pattern,
-                input_size=self.input_size,
-                use_valid=False,
-                is_train=self.is_train,
-                use_fourier=self.use_fourier,
             )
 
         else:
@@ -607,47 +591,3 @@ class RobustnessAttacks:
             return image.transpose(Image.FLIP_LEFT_RIGHT)
         else:
             raise ValueError("Horizontal flip requires PIL Image")
-
-
-class FourierMagnitudeTransform:
-    """
-    Transform that converts RGB image to Fourier magnitude spectrum.
-    Matches the implementation in analysis_WILD_fourier.py:
-    - Converts RGB to grayscale using standard luminance weights
-    - Computes 2D FFT on grayscale
-    - Returns magnitude spectrum with log scale
-    - Replicates to 3 channels for CNN compatibility
-    """
-    def __init__(self):
-        pass
-    
-    def __call__(self, img):
-        """
-        Args:
-            img: PIL Image or numpy array of shape (H, W, 3)
-        
-        Returns:
-            numpy array of shape (H, W, 3) with Fourier magnitude spectrum
-        """
-        # Convert PIL to numpy if needed
-        if isinstance(img, Image.Image):
-            img = np.array(img)
-        
-        # Convert RGB to grayscale using standard luminance weights
-        # Y = 0.299*R + 0.587*G + 0.114*B
-        gray = 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
-        
-        # Compute 2D FFT on grayscale image
-        f = np.fft.fft2(gray)
-        # Shift zero frequency to center
-        fshift = np.fft.fftshift(f)
-        # Compute magnitude spectrum with log scale
-        magnitude = 20 * np.log(np.abs(fshift) + 1)
-        
-        # Normalize to [0, 255] range
-        magnitude = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-8) * 255
-        
-        # Replicate to 3 channels for CNN input (H, W) → (H, W, 3)
-        magnitude_rgb = np.stack([magnitude, magnitude, magnitude], axis=-1)
-        
-        return magnitude_rgb.astype(np.uint8)

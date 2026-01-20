@@ -8,19 +8,19 @@ from PIL import Image
 import argparse
 
 def get_args():
-    parser = argparse.ArgumentParser(description="Generate mean images for FF4ALL and real datasets")
+    parser = argparse.ArgumentParser(description="Generate mean images for WILD and real datasets")
     parser.add_argument('--num_images', type=int, default=1000, help='Number of mean images to generate per class/folder')
     parser.add_argument('--mean_size', type=int, default=500, help='Number of images to average for each mean image')
     parser.add_argument('--output_dir', type=str, default=None, help='Directory to save generated mean images')
-    parser.add_argument('--ff4all_glob', type=str, default='/media/orazio_mattia_group/ad4dd/FF4ALL/**/*', help='Glob path for FF4ALL folders')
-    parser.add_argument('--ff4all_base', type=str, default='/media/orazio_mattia_group/ad4dd/FF4ALL', help='Base path for FF4ALL images')
+    parser.add_argument('--ff4all_glob', type=str, default='/media/orazio_mattia_group/ad4dd/WILD/**/*', help='Glob path for WILD folders')
+    parser.add_argument('--ff4all_base', type=str, default='/media/orazio_mattia_group/ad4dd/WILD', help='Base path for WILD images')
     parser.add_argument('--celeba_hq_glob', type=str, default='/media/orazio_mattia_group/ad4dd/celeba_hq/**/**/*.jpg', help='Glob path for CelebA-HQ dataset')
     parser.add_argument('--ffhq_glob', type=str, default='/media/orazio_mattia_group/ad4dd/ffhq/*/*.png', help='Glob path for FFHQ real images')
     parser.add_argument('--real_folders', type=str, nargs='+', default=['ffhq'], help='List of real folders to process')
     args = parser.parse_args()
 
     if args.output_dir is None:
-        args.output_dir = f"/media/orazio_mattia_group/ad4dd/FF4ALL_means/{args.mean_size}/"
+        args.output_dir = f"/media/orazio_mattia_group/ad4dd/WILD_means/{args.mean_size}/"
 
     return args
 

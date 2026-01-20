@@ -4,3 +4,4 @@
 *.pkl
 *.png
 baselines/
+**/tmp.py

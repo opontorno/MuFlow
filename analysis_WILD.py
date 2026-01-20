@@ -22,13 +22,18 @@ config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 
 # === Model Setup ===
-model = timm.create_model(model_name, pretrained=True, features_only=True, in_chans=3, out_indices=[1, 2, 3])
+out_indices = config.get("out_indices", [1, 2, 3])  # Get from config or default
+print(f"Using out_indices: {out_indices}")
+
+model = timm.create_model(model_name, pretrained=True, features_only=True, in_chans=3, out_indices=out_indices)
 model.eval()
 
 channels = model.feature_info.channels()
 print("Channels: ", channels)
 scales = model.feature_info.reduction()
 print("Scales: ", scales)
+num_layers = len(out_indices)
+print(f"Number of layers: {num_layers}")
 
 # Create output directory for plots
 os.makedirs('.pictures', exist_ok=True)
@@ -112,7 +117,7 @@ def plot_generators_grid(generators_dict, save_path, cols=6):
     print(f"Saved grid to {save_path}")
 
 
-def extract_features_by_class(patterns_dict, sample_size=100):
+def extract_features_by_class(patterns_dict, sample_size=100, num_layers=3):
     """Extract features from images grouped by class/generator."""
     features_by_class = {}
     labels = []
@@ -124,7 +129,7 @@ def extract_features_by_class(patterns_dict, sample_size=100):
             continue
         
         sample = random.sample(files, min(sample_size, len(files)))
-        layer_features = {0: [], 1: [], 2: []}
+        layer_features = {i: [] for i in range(num_layers)}
         
         for img_path in sample:
             try:
@@ -145,8 +150,12 @@ def extract_features_by_class(patterns_dict, sample_size=100):
     return features_by_class, labels
 
 
-def plot_tsne_analysis(features_by_class, colors_dict, save_prefix, num_layers=3):
+def plot_tsne_analysis(features_by_class, colors_dict, save_prefix, num_layers=None):
     """Run t-SNE analysis and plot for each feature layer."""
+    if num_layers is None:
+        # Infer from features_by_class
+        num_layers = len(next(iter(features_by_class.values())))
+    
     for layer_idx in range(num_layers):
         print(f"Applying t-SNE for layer {layer_idx}...")
         
@@ -225,7 +234,7 @@ print("\n" + "="*80)
 print("PART 1: Analyzing Single Images")
 print("="*80 + "\n")
 
-common_path = "/media/orazio_mattia_group/ad4dd/FF4ALL"
+common_path = "/media/orazio_mattia_group/ad4dd/WILD"
 patterns = {}
 
 # Get generators from Closed Set
@@ -257,11 +266,11 @@ plot_generators_grid(generators_dict_single, f'.pictures/analysis-{model_name}_s
 
 # Extract features
 print("Extracting features from single images...")
-features_by_class_single, labels_single = extract_features_by_class(patterns, sample_size=100)
+features_by_class_single, labels_single = extract_features_by_class(patterns, sample_size=100, num_layers=num_layers)
 
 # Run t-SNE analysis and plot
 print("Running t-SNE analysis on single images...")
-plot_tsne_analysis(features_by_class_single, colors, f'analysis-{model_name}_tsne_single')
+plot_tsne_analysis(features_by_class_single, colors, f'analysis-{model_name}_tsne_single', num_layers=num_layers)
 
 
 # ============================================================================
@@ -271,7 +280,7 @@ print("\n" + "="*80)
 print("PART 2: Analyzing Mean Images")
 print("="*80 + "\n")
 
-common_path_means = "/media/orazio_mattia_group/ad4dd/FF4ALL_means/500"
+common_path_means = "/media/orazio_mattia_group/ad4dd/WILD_means/500"
 patterns_means = {}
 
 if os.path.exists(common_path_means):
@@ -290,11 +299,11 @@ plot_generators_grid(generators_dict_means, f'.pictures/analysis-{model_name}_me
 
 # Extract features from mean images
 print("Extracting features from mean images...")
-features_by_class_means, labels_means = extract_features_by_class(patterns_means, sample_size=100)
+features_by_class_means, labels_means = extract_features_by_class(patterns_means, sample_size=100, num_layers=num_layers)
 
 # Run t-SNE analysis and plot
 print("Running t-SNE analysis on mean images...")
-plot_tsne_analysis(features_by_class_means, colors, f'analysis-{model_name}_tsne_means')
+plot_tsne_analysis(features_by_class_means, colors, f'analysis-{model_name}_tsne_means', num_layers=num_layers)
 
 print("\n" + "="*80)
 print("Analysis complete! All plots saved to .pictures/ folder")

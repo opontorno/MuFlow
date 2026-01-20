@@ -19,6 +19,48 @@ from sklearn.metrics import accuracy_score, average_precision_score
 from sklearn.neighbors import LocalOutlierFactor
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default='configs/resnet18.yaml', help="path to config file")
+
+    parser.add_argument("--data", type=str, default='WILD', help="path to mvtec folder", choices=['FF++', 'WILD', 'progan'])
+    parser.add_argument("--reals", type=str, default='ffhq', help="reals dataset", choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'])
+    parser.add_argument("--test", type=str, help="test name")
+    parser.add_argument("--checkpoint", type=str, help="path to load checkpoint")
+
+    parser.add_argument('--wandb', default= 'disabled', choices=['online', 'offline', 'disabled'])
+    parser.add_argument('--use_augs', type=int, default=0, choices=[0, 1], help="Whether to use data augmentation")
+    parser.add_argument('--use_fourier', type=int, default=0, choices=[0, 1], help="Whether to use Fourier transform")
+    parser.add_argument('--run_name', type=str)
+    parser.add_argument('--model_type', type=str, choices=['FastFlow', 'VAE'], default='FastFlow', help="Choose the model to train")
+    parser.add_argument('--eval_interval', type=int, default=1)
+    parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
+    parser.add_argument('--log_interval', type=int, default=10)
+    parser.add_argument('--num_workers', type=int, default=4, help="number of data loading workers")
+    parser.add_argument('--use_proj', type=int, default=0, choices=[0, 1], help="Whether to use projection layer")
+
+    # Hyperparameters
+    parser.add_argument('--optimizer', type=str, default='AdamW', choices=['AdamW', 'sgd'])
+    parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--weight_decay', type=float, default=1e-5)
+    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--num_epochs', type=int, default=1000)
+    parser.add_argument('--scheduler', type=int, default=1, choices=[0, 1], help="Whether to use scheduler")
+    parser.add_argument('--lr_decay', type=float, default=0.3)
+    parser.add_argument('--lr_patience', type=int, default=35)
+
+    parser.add_argument('--use_lof', type=int, default=0, choices=[0, 1], help="Whether to use LOF")
+    parser.add_argument('--contamination', default='auto')
+    parser.add_argument('--use_percentile', type=int, default=0, choices=[0, 1], help="Whether to use percentile")
+    parser.add_argument('--percentile', type=int, default=95)
+
+    parser.add_argument('--early_stopping_patience', type=float, default=float("inf"), help="Patience epochs for early stopping based on Val Acc")
+
+    args = parser.parse_args()
+    
+    return args
+
+
 def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last, return_class2idx=False):
     """
     Helper function to create DataLoader with common logic.
@@ -74,8 +116,15 @@ def build_test_data_loader(args, config):
 
 def build_model(config, model_type, args):
     
-    gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_fourier_{args.reals}_{config['input_size']}.npy" if args.use_fourier == 1 \
-                else f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_{args.reals}_{config['input_size']}.npy"
+    # Get out_indices for filename
+    out_indices = config.get("out_indices", [1, 2, 3])
+    out_indices_str = str(out_indices)
+    
+    # Try new naming convention (with out_indices)
+    if args.use_fourier == 1:
+        gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}.npy"
+    else:
+        gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}.npy"
     
     gmm_values = np.load(gmm_parameters, allow_pickle=True).item() 
     print(f"Loading gmm parameters from {gmm_parameters}")
@@ -89,7 +138,9 @@ def build_model(config, model_type, args):
             hidden_ratio=config["hidden_ratio"],
             gmm_values=gmm_values,
             in_channels=3,  # Always 3 channels (RGB or replicated Fourier magnitude)
-            backbone_weights=args.backbone_weights
+            backbone_weights=args.backbone_weights,
+            out_indices=config.get("out_indices", [1, 2, 3]),  # Default [1,2,3] if not specified
+            use_proj=True if args.use_proj == 1 else False
         )
         print(
             "Model A.D. Param#: {}".format(
@@ -258,9 +309,6 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
         likelihood_fake = preds_[labels > 0]
 
         plt.figure(figsize=(10, 6))
-
-        # plt.scatter(range(len(likelihood_real)), likelihood_real, label='Real', color='blue', alpha=0.5)
-        # plt.scatter(range(len(likelihood_fake)), likelihood_fake, label='Fake', color='orange', alpha=0.5)
         
         sns.kdeplot(likelihood_real, label='Real', color='blue')
         sns.kdeplot(likelihood_fake, label='Fake', color='orange')
@@ -272,10 +320,20 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
         plt.savefig(const.CHECKPOINT_DIR+"/real_fake_likelihoods_{}.png".format(epoch))
     
     aps, accs, cls = [], [], []
+    
+    # Dictionary to store per-class metrics for wandb logging
+    per_class_metrics = {}
 
     classes = np.unique(labels)
     y_true_0 = labels[labels == 0]
     y_pred_0 = preds[labels == 0]
+    
+    # Log loss for Real class (class 0)
+    if len(preds_[labels == 0]) > 0:
+        loss_mean_real = np.mean(preds_[labels == 0])
+        loss_std_real = np.std(preds_[labels == 0])
+        per_class_metrics["loss_per_class/Real"] = loss_mean_real
+        per_class_metrics["loss_std_per_class/Real"] = loss_std_real
 
     np.random.seed(42)
     
@@ -290,6 +348,13 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
             print(f"  > Class {class2idx[c] if class2idx else c}: SKIPPED (0 samples)")
             continue
         
+        # Get class name for logging
+        class_name = class2idx[c] if class2idx else str(c)
+        
+        # Compute loss statistics for this class
+        loss_mean_fake = np.mean(preds_[labels == c])
+        loss_std_fake = np.std(preds_[labels == c])
+        
         #Shuffling real to get different subset each time
         idx = np.random.permutation(len(y_true_0))
         y_true_0 = y_true_0[idx]
@@ -303,7 +368,13 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
         ap = average_precision_score(y_true_binary, y_pred_balanced)
         acc0 = accuracy_score(y_true_binary, y_pred_balanced)
         
-        print(f"  > Class {class2idx[c] if class2idx else c} (N={min_len*2}): \t AP = {ap:.4f}, \t Accuracy = {acc0:.4f}")
+        print(f"  > Class {class_name} (N={min_len*2}): \t AP = {ap:.4f}, \t Accuracy = {acc0:.4f}, \t Loss = {loss_mean_fake:.4f}±{loss_std_fake:.4f}")
+        
+        # Store metrics for wandb logging
+        per_class_metrics[f"loss_per_class/{class_name}"] = loss_mean_fake
+        per_class_metrics[f"loss_std_per_class/{class_name}"] = loss_std_fake
+        per_class_metrics[f"ap_per_class/{class_name}"] = ap
+        per_class_metrics[f"acc_per_class/{class_name}"] = acc0
         
         aps.append(ap)
         accs.append(acc0)
@@ -324,13 +395,20 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
     test_loss_real_std = np.std(preds_[labels == 0]) if len(preds_[labels == 0]) > 0 else 0
     test_loss_fake_std = np.std(preds_[labels > 0]) if len(preds_[labels > 0]) > 0 else 0
     
-    wandb.log({
+    # Prepare wandb log dictionary with overall metrics
+    wandb_log_dict = {
         "Val acc": mean_acc, 
         "Test loss real mean": test_loss_real_mean,
         "Test loss fake mean": test_loss_fake_mean,
         "Test loss real std": test_loss_real_std,
         "Test loss fake std": test_loss_fake_std
-    }, step=epoch + 1)
+    }
+    
+    # Add per-class metrics
+    wandb_log_dict.update(per_class_metrics)
+    
+    # Log everything together
+    wandb.log(wandb_log_dict, step=epoch + 1)
 
     return mean_acc, preds_, labels
 
@@ -457,46 +535,6 @@ def train(args):
     
     print(f"Training finished. Best accuracy: {best_acc:.4f}")
 
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default='configs/resnet18.yaml', help="path to config file")
-
-    parser.add_argument("--data", type=str, default='FF4ALL', help="path to mvtec folder", choices=['FF++', 'FF4ALL', 'progan'])
-    parser.add_argument("--reals", type=str, default='ffhq', help="reals dataset", choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'])
-    parser.add_argument("--test", type=str, help="test name")
-    parser.add_argument("--checkpoint", type=str, help="path to load checkpoint")
-
-    parser.add_argument('--wandb', default= 'disabled', choices=['online', 'offline', 'disabled'])
-    parser.add_argument('--use_augs', type=int, default=0, choices=[0, 1], help="Whether to use data augmentation")
-    parser.add_argument('--use_fourier', type=int, default=0, choices=[0, 1], help="Whether to use Fourier transform")
-    parser.add_argument('--run_name', type=str)
-    parser.add_argument('--model_type', type=str, choices=['FastFlow', 'VAE'], default='FastFlow', help="Choose the model to train")
-    parser.add_argument('--eval_interval', type=int, default=1)
-    parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
-    parser.add_argument('--log_interval', type=int, default=10)
-    parser.add_argument('--num_workers', type=int, default=4, help="number of data loading workers")
-
-    # Hyperparameters
-    parser.add_argument('--optimizer', type=str, default='AdamW', choices=['AdamW', 'sgd'])
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--weight_decay', type=float, default=1e-5)
-    parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--num_epochs', type=int, default=1000)
-    parser.add_argument('--scheduler', type=int, default=0, choices=[0, 1], help="Whether to use scheduler")
-    parser.add_argument('--lr_decay', type=float, default=0.9)
-    parser.add_argument('--lr_patience', type=int, default=30)
-
-    parser.add_argument('--use_lof', type=int, default=0, choices=[0, 1], help="Whether to use LOF")
-    parser.add_argument('--contamination', default='auto')
-    parser.add_argument('--use_percentile', type=int, default=0, choices=[0, 1], help="Whether to use percentile")
-    parser.add_argument('--percentile', type=int, default=95)
-
-    parser.add_argument('--early_stopping_patience', type=int, default=400, help="Patience epochs for early stopping based on Val Acc")
-
-    args = parser.parse_args()
-    
-    return args
 
 if __name__ == "__main__":
     args = parse_args()

@@ -11,13 +11,13 @@ random.seed(42)
 csv_data = []
 
 # ============================================================================
-# 1. FF4ALL - split by class with proportion 70-15-15 (train-val-test)
+# 1. WILD - split by class with proportion 70-15-15 (train-val-test)
 # ============================================================================
 print("=" * 60)
-print("Processing FF4ALL (with classes)")
+print("Processing WILD (with classes)")
 print("=" * 60)
 
-path_pattern_ff4all = "/media/orazio_mattia_group/ad4dd/FF4ALL/*/*/*.png"
+path_pattern_ff4all = "/media/orazio_mattia_group/ad4dd/WILD/*/*/*.png"
 all_files_ff4all = glob.glob(path_pattern_ff4all)
 
 # Organize files by class
@@ -63,8 +63,8 @@ print("=" * 60)
 path_pattern_other = "/media/orazio_mattia_group/ad4dd/*/*/*.png"
 all_files_other = glob.glob(path_pattern_other)
 
-# Exclude FF4ALL files already processed
-all_files_other = [f for f in all_files_other if "/FF4ALL/" not in f]
+# Exclude WILD files already processed
+all_files_other = [f for f in all_files_other if "/WILD/" not in f]
 
 # Split into train (70%), val (15%) and test (15%)
 random.shuffle(all_files_other)
