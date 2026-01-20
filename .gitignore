@@ -5,4 +5,4 @@
 *.png
 baselines/
 **/tmp.py
-parameters/
+parameters/*.npy
