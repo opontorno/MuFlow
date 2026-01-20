@@ -68,6 +68,7 @@ class FastFlow(nn.Module):
         in_channels=3,
         out_indices=[1, 2, 3],
         use_proj=False,
+        pooling_type='mean',
     ):
         super(FastFlow, self).__init__()
         assert (
@@ -138,6 +139,7 @@ class FastFlow(nn.Module):
                 )
             )
         self.input_size = input_size
+        self.pooling_type = pooling_type
 
         gmm_values = gmm_values["real"]
         self.means = []
@@ -215,9 +217,12 @@ class FastFlow(nn.Module):
             #    loss += torch.mean(
             #         0.5 / det(s)**2 * torch.sum((output-m)**2, dim=(1, 2, 3)) - log_jac_det
             #     )
-            output = output.mean((2,3)) #TODO AVG POOLING, MAX POOLING, LIKELIHOOD SPAZIALE (USARE ULTIME FEATURES, INTERPOLAZIONE FEATURES)
-        
-            #output = output.flatten(2,3).max(-1)[0]
+            if self.pooling_type == 'mean':
+                # Spatial pooling: (B, C, H, W) -> (B, C)
+                output = output.mean((2,3))
+            else:  # flatten
+                # Flatten spatial dims: (B, C, H, W) -> (B, C*H*W)
+                output = output.flatten(1)
 
             # if i==2:
             loss.append(gaussian_nll_loss(output=output, mu=mu, cov=cov, log_jac_det=log_jac_det))

@@ -95,12 +95,13 @@ def build_model(config, model_type, args):
     # Get out_indices for filename
     out_indices = config.get("out_indices", [1, 2, 3])
     out_indices_str = str(out_indices)
+    pooling_type = getattr(args, 'pooling_type', 'mean')
     
-    # Try new naming convention (with out_indices)
+    # Try new naming convention (with out_indices and pooling_type)
     if args.use_fourier == 1:
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}.npy"
+        gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}_{pooling_type}.npy"
     else:
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}.npy"
+        gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
     
     gmm_values = np.load(gmm_parameters, allow_pickle=True).item() 
     print(f"Loading gmm parameters from {gmm_parameters}")
@@ -116,7 +117,8 @@ def build_model(config, model_type, args):
             in_channels=3,  # Always 3 channels (RGB or replicated Fourier magnitude)
             backbone_weights=args.backbone_weights if hasattr(args, 'backbone_weights') and args.backbone_weights else None,
             out_indices=config.get("out_indices", [1, 2, 3]),  # Default [1,2,3] if not specified
-            use_proj=True if hasattr(args, 'use_proj') and args.use_proj == 1 else False
+            use_proj=True if hasattr(args, 'use_proj') and args.use_proj == 1 else False,
+            pooling_type=pooling_type
         )
         print(
             "Model A.D. Param#: {}".format(
@@ -369,6 +371,7 @@ def parse_args():
     parser.add_argument('--model_type', type=str, choices=['FastFlow', 'VAE'], default='FastFlow', help="Choose the model to train")
     parser.add_argument('--on_celeba', action='store_true', help="Use celeba dataset")
     parser.add_argument('--num_workers', type=int, default=4, help="number of data loading workers")
+    parser.add_argument('--pooling_type', type=str, default='mean', choices=['mean', 'flatten'], help="Spatial pooling type: mean or flatten")
 
     # Threshold method arguments
     parser.add_argument('--use_lof', type=int, default=0, choices=[0, 1], help="Whether to use LOF (requires lof_checkpoint)")

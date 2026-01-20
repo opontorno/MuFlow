@@ -26,18 +26,23 @@ parser.add_argument('--reals', type=str, default='ffhq',
                     help='Real images dataset')
 parser.add_argument('--use_fourier', action='store_true',
                     help='Use Fourier magnitude spectrum instead of RGB')
+parser.add_argument('--pooling_type', type=str, default='mean',
+                    choices=['mean', 'flatten'],
+                    help='Spatial pooling type: mean or flatten')
 args = parser.parse_args()
 
 # === Hyperparameters ===
 model_name = args.model_name
 reals = args.reals
 use_fourier = args.use_fourier
+pooling_type = args.pooling_type
 
 config_path = f"{const.WORKING_DIR}/FastFlow/configs/{model_name}.yaml" 
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 print(f"Use Fourier: {use_fourier}")
 print(f"Reals dataset: {reals}")
+print(f"Pooling type: {pooling_type}")
 
 
 # === Model Setup ===
@@ -189,7 +194,12 @@ for i, img_path in tqdm(enumerate(real_sample), total=len(real_sample)):
     features = get_features_from_path(img_path, apply_fourier=use_fourier)
     feats_ = []
     for feats in features:
-        feats_.append(feats.mean([2, 3]).flatten().cpu().numpy())
+        if pooling_type == 'mean':
+            # Spatial pooling: (B, C, H, W) -> (B, C)
+            feats_.append(feats.mean([2, 3]).flatten().cpu().numpy())
+        else:  # flatten
+            # Flatten spatial dims: (B, C, H, W) -> (B, C*H*W)
+            feats_.append(feats.flatten(1).cpu().numpy().squeeze(0))
     real_features.append(feats_)
 
 print("Feature extraction complete!")
@@ -207,9 +217,9 @@ for i in range(num_layers):
 
 # Generate output filename based on parameters
 if use_fourier:
-    output_filename = f"{const.WORKING_DIR}/parameters/gmm_parameters_{model_name}_indices_{str(out_indices)}_fourier_{reals}_{config['input_size']}.npy"
+    output_filename = f"{const.WORKING_DIR}/parameters/gmm_parameters_{model_name}_indices_{str(out_indices)}_fourier_{reals}_{config['input_size']}_{pooling_type}.npy"
 else:
-    output_filename = f"{const.WORKING_DIR}/parameters/gmm_parameters_{model_name}_indices_{out_indices}_{reals}_{config['input_size']}.npy"
+    output_filename = f"{const.WORKING_DIR}/parameters/gmm_parameters_{model_name}_indices_{out_indices}_{reals}_{config['input_size']}_{pooling_type}.npy"
 
 print(f"\nSaving GMM parameters to: {output_filename}")
 np.save(output_filename, gmm)
