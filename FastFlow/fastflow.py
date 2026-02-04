@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import constants as const
+from projection_layers import create_projection_layer
 
 import numpy as np
 import pdb
@@ -68,6 +69,7 @@ class FastFlow(nn.Module):
         in_channels=3,
         out_indices=[1, 2, 3],
         use_proj=False,
+        projection_type='conv',
         pooling_type='mean',
     ):
         super(FastFlow, self).__init__()
@@ -109,22 +111,19 @@ class FastFlow(nn.Module):
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
 
-        # Projection layer: Convolutional network with 1x1 convolutions that maintains feature dimensions
-        # Operates on channel dimension, processing each spatial location independently
+        # Projection layer: Use factory pattern to create projection layers
         self.use_proj = use_proj
+        self.projection_type = projection_type
         if self.use_proj:
             self.projection_layers = nn.ModuleList()
             for in_channels in channels:
-                # Convolutional projection: C -> hidden_dim -> C with 1x1 kernels
-                # 1x1 convolutions maintain spatial dimensions while transforming channels
-                hidden_dim = int(in_channels / 2)  # Hidden dimension
-                self.projection_layers.append(
-                    nn.Sequential(
-                        nn.Conv2d(in_channels, hidden_dim, kernel_size=1, bias=True),  # 1x1 conv
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(hidden_dim, in_channels, kernel_size=1, bias=True)  # 1x1 conv
-                    )
+                # Create projection layer using factory
+                proj_layer = create_projection_layer(
+                    projection_type=projection_type,
+                    in_channels=in_channels,
+                    hidden_ratio=0.5  # Can be made configurable
                 )
+                self.projection_layers.append(proj_layer)
         else:
             self.projection_layers = None
 
@@ -220,8 +219,19 @@ class FastFlow(nn.Module):
             if self.pooling_type == 'mean':
                 # Spatial pooling: (B, C, H, W) -> (B, C)
                 output = output.mean((2,3))
-            else:  # flatten
-                # Flatten spatial dims: (B, C, H, W) -> (B, C*H*W)
+            elif self.pooling_type == 'max':
+                # Max pooling: (B, C, H, W) -> (B, C)
+                output = output.flatten(2).max(-1)[0]
+            elif self.pooling_type == 'mean_std':
+                # Mean + Std concatenation: (B, C, H, W) -> (B, 2*C)
+                mean_output = output.mean((2,3))
+                std_output = output.std((2,3))
+                output = torch.cat([mean_output, std_output], dim=1)
+            elif self.pooling_type == 'flatten':
+                # Mean on channels, then flatten spatial: (B, C, H, W) -> (B, C, W) -> (B, C*H)
+                output = output.mean(-1).flatten(1)
+            else:
+                # Full flatten: (B, C, H, W) -> (B, C*H*W)
                 output = output.flatten(1)
 
             # if i==2:

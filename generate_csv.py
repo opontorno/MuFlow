@@ -91,7 +91,41 @@ print(f"  Test: {len(test_files_other)} images ({len(test_files_other)/len(all_f
 print(f"  Total: {len(all_files_other)} images\n")
 
 # ============================================================================
-# 3. CelebA HQ - keep original train/val split, val becomes "val"
+# 3. datasets_DFX - split with proportion 70-15-15 (train-val-test)
+# ============================================================================
+print("=" * 60)
+print("Processing datasets_DFX")
+print("=" * 60)
+
+path_pattern_dfx = "/media/orazio_mattia_group/ad4dd/datasets_DFX/*/*.png"
+all_files_dfx = glob.glob(path_pattern_dfx)
+
+# Split into train (70%), val (15%) and test (15%)
+random.shuffle(all_files_dfx)
+n_train_dfx = int(len(all_files_dfx) * 0.7)
+n_val_dfx = int(len(all_files_dfx) * 0.15)
+
+train_files_dfx = all_files_dfx[:n_train_dfx]
+val_files_dfx = all_files_dfx[n_train_dfx:n_train_dfx + n_val_dfx]
+test_files_dfx = all_files_dfx[n_train_dfx + n_val_dfx:]
+
+for file_path in train_files_dfx:
+    csv_data.append([file_path, "train"])
+
+for file_path in val_files_dfx:
+    csv_data.append([file_path, "val"])
+
+for file_path in test_files_dfx:
+    csv_data.append([file_path, "test"])
+
+print(f"datasets_DFX:")
+print(f"  Train: {len(train_files_dfx)} images ({len(train_files_dfx)/len(all_files_dfx)*100:.1f}%)")
+print(f"  Val: {len(val_files_dfx)} images ({len(val_files_dfx)/len(all_files_dfx)*100:.1f}%)")
+print(f"  Test: {len(test_files_dfx)} images ({len(test_files_dfx)/len(all_files_dfx)*100:.1f}%)")
+print(f"  Total: {len(all_files_dfx)} images\n")
+
+# ============================================================================
+# 4. CelebA HQ - keep original train/val split, val becomes "val"
 # ============================================================================
 print("=" * 60)
 print("Processing CelebA HQ")

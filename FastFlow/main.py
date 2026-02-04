@@ -1,5 +1,6 @@
 import argparse
-import os
+from pprint import pprint
+import os, pdb
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import yaml
@@ -37,10 +38,8 @@ def parse_args():
     parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
     parser.add_argument('--log_interval', type=int, default=10)
     parser.add_argument('--num_workers', type=int, default=4, help="number of data loading workers")
-    parser.add_argument('--use_proj', type=int, default=0, choices=[0, 1], help="Whether to use projection layer")
-    parser.add_argument('--pooling_type', type=str, default='mean', choices=['mean', 'flatten'], help="Spatial pooling type: mean or flatten")
 
-    # Hyperparameters
+    # Training Hyperparameters
     parser.add_argument('--optimizer', type=str, default='AdamW', choices=['AdamW', 'sgd'])
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-5)
@@ -50,6 +49,10 @@ def parse_args():
     parser.add_argument('--lr_decay', type=float, default=0.3)
     parser.add_argument('--lr_patience', type=int, default=35)
 
+    # Model Hyperparameters
+    parser.add_argument('--threshold_type', type=str, default='standard', choices=['standard', 'strict', 'very_strict'], help="Type of thresholding")
+    parser.add_argument('--use_proj', type=int, default=0, choices=[0, 1], help="Whether to use projection layer")
+    parser.add_argument('--projection_type', type=str, default='conv', choices=['conv', 'mlp', 'autoencoder', 'identity'], help="Type of projection layer")
     parser.add_argument('--use_lof', type=int, default=0, choices=[0, 1], help="Whether to use LOF")
     parser.add_argument('--contamination', default='auto')
     parser.add_argument('--use_percentile', type=int, default=0, choices=[0, 1], help="Whether to use percentile")
@@ -120,13 +123,14 @@ def build_model(config, model_type, args):
     # Get out_indices for filename
     out_indices = config.get("out_indices", [1, 2, 3])
     out_indices_str = str(out_indices)
-    pooling_type = getattr(args, 'pooling_type', 'mean')
+    pooling_type = config.get("pooling_type", "mean")
+    n_components = config.get("gmm_n_components", 1)
     
     # Try new naming convention (with out_indices and pooling_type)
     if args.use_fourier == 1:
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}_{pooling_type}.npy"
+        gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}_{pooling_type}.npy"
     else:
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
+        gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
     
     gmm_values = np.load(gmm_parameters, allow_pickle=True).item() 
     print(f"Loading gmm parameters from {gmm_parameters}")
@@ -143,6 +147,7 @@ def build_model(config, model_type, args):
             backbone_weights=args.backbone_weights,
             out_indices=config.get("out_indices", [1, 2, 3]),  # Default [1,2,3] if not specified
             use_proj=True if args.use_proj == 1 else False,
+            projection_type=getattr(args, 'projection_type', 'conv'),
             pooling_type=pooling_type
         )
         print(
@@ -204,7 +209,7 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
     return train_mean, train_std, preds_train
 
 
-def compute_threshold(val_dataloader, model, model_type="FastFlow", use_lof=False, contamination='auto', use_percentile=False, percentile=95):
+def compute_threshold(val_dataloader, model, model_type="FastFlow", use_lof=False, contamination='auto', use_percentile=False, percentile=95, threshold_type='standard'):
     """
     Compute threshold for anomaly detection using validation set.
     
@@ -266,7 +271,13 @@ def compute_threshold(val_dataloader, model, model_type="FastFlow", use_lof=Fals
         threshold = np.percentile(losses, percentile)
         result['threshold'] = threshold
     else:
-        threshold = mean + 3 * std
+        if threshold_type == 'standard':
+            lambda_ = 3
+        elif threshold_type == 'strict':
+            lambda_ = 2
+        else:  # threshold_type == 'very_strict':
+            lambda_ = 1
+        threshold = mean + lambda_ * std
         result['threshold'] = threshold
     
     return result
@@ -416,11 +427,9 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
     return mean_acc, preds_, labels
 
 
-def train(args):
+def train(args, config):
     checkpoint_dir = const.CHECKPOINT_DIR
     os.makedirs(checkpoint_dir, exist_ok=True)
-    
-    config = yaml.safe_load(open(args.config, "r"))
 
     wandb.init(
         entity="orazio-mattia",
@@ -455,7 +464,7 @@ def train(args):
         
         if (epoch + 1) % args.eval_interval == 0:
             # Compute threshold on validation set
-            threshold_info = compute_threshold(val_dataloader, model, args.model_type, use_lof=True if args.use_lof==1 else False, contamination=args.contamination, use_percentile=True if args.use_percentile==1 else False, percentile=args.percentile)
+            threshold_info = compute_threshold(val_dataloader, model, args.model_type, use_lof=True if args.use_lof==1 else False, contamination=args.contamination, use_percentile=True if args.use_percentile==1 else False, percentile=args.percentile, threshold_type=args.threshold_type)
             
             # Log validation threshold statistics
             threshold_val = threshold_info['threshold']
@@ -541,18 +550,26 @@ def train(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    print(args)
+    config = yaml.safe_load(open(args.config, "r"))
+    pprint(vars(args))
+    pprint(config)
 
     if args.run_name is None:
-        args.run_name = f"{args.data}_{args.reals}"
+        args.run_name = f"{config['backbone_name']}_{args.data}_{args.reals}"
         if args.use_fourier == 1:
             args.run_name += "_fourier"
-        args.run_name += f"_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}_ld{args.lr_decay}_lp{args.lr_patience}"
+        args.run_name += f"_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}_ld{args.lr_decay}_lp{args.lr_patience}_{config['pooling_type']}"
+        
+        if not args.threshold_type == 'standard':
+            args.run_name += f"_t-{args.threshold_type}"
         if args.use_lof == 1:
             args.run_name += "_lof"
         if args.use_percentile == 1:
             args.run_name += f"_percentile{args.percentile}"
 
+        if args.use_augs == 1:
+            args.run_name += "_augs"
+
     const.CHECKPOINT_DIR += "/" + args.run_name 
 
-    train(args)
+    train(args, config)

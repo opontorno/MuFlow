@@ -169,14 +169,16 @@ class Dataset:
                 # root_dir = [f"{c.DATA_DIR}/ffhq/{fol}" for fol in os.listdir(f"{c.DATA_DIR}/ffhq") if fol not in test_folders] if self.is_train \
                 #             else [f"{c.DATA_DIR}/ffhq/{fol}" for fol in test_folders] + [f"{c.DATA_DIR}/WILD/**/**"]
                 root_dir = [f"{c.DATA_DIR}/ffhq/*"] if self.is_train \
-                            else [f"{c.DATA_DIR}/ffhq/*"] + [f"{c.DATA_DIR}/WILD/**/**"]
+                            else [f"{c.DATA_DIR}/ffhq/*"] + [f"{c.DATA_DIR}/WILD/**/**"] + [f"{c.DATA_DIR}/datasets_DFX/**"]
                 file_pattern = "*.png" 
             elif self.reals_name == 'celeba_hq':
-                root_dir = [f"{c.DATA_DIR}/celeba_hq/train/*"] if self.is_train else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/WILD/*"]
+                root_dir = [f"{c.DATA_DIR}/celeba_hq/train/*"] if self.is_train \
+                            else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/WILD/*"] + [f"{c.DATA_DIR}/datasets_DFX/**"]
                 file_pattern = "**/*.*g" 
             #########################################################check effectivness#############################
             elif self.reals_name == 'ffhq+celeba_hq':
-                root_dir = [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*"] if self.is_train else [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*", f"{c.DATA_DIR}/WILD/*"]
+                root_dir = [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*"] if self.is_train \
+                            else [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*", f"{c.DATA_DIR}/WILD/*"] + [f"{c.DATA_DIR}/datasets_DFX/**"]
                 file_pattern = "**/*" 
             ###################################################################################################
 

@@ -14,6 +14,8 @@ def get_args():
     parser.add_argument('--output_dir', type=str, default=None, help='Directory to save generated mean images')
     parser.add_argument('--ff4all_glob', type=str, default='/media/orazio_mattia_group/ad4dd/WILD/**/*', help='Glob path for WILD folders')
     parser.add_argument('--ff4all_base', type=str, default='/media/orazio_mattia_group/ad4dd/WILD', help='Base path for WILD images')
+    parser.add_argument('--datasets_dfx_glob', type=str, default='/media/orazio_mattia_group/ad4dd/datasets_DFX/*', help='Glob path for datasets_DFX folders')
+    parser.add_argument('--datasets_dfx_base', type=str, default='/media/orazio_mattia_group/ad4dd/datasets_DFX', help='Base path for datasets_DFX images')
     parser.add_argument('--celeba_hq_glob', type=str, default='/media/orazio_mattia_group/ad4dd/celeba_hq/**/**/*.jpg', help='Glob path for CelebA-HQ dataset')
     parser.add_argument('--ffhq_glob', type=str, default='/media/orazio_mattia_group/ad4dd/ffhq/*/*.png', help='Glob path for FFHQ real images')
     parser.add_argument('--real_folders', type=str, nargs='+', default=['ffhq'], help='List of real folders to process')
@@ -32,6 +34,12 @@ def main():
 
     ff4all_folders = glob.glob(args.ff4all_glob)
     fake_folders = [fold.split('/')[-1] for fold in ff4all_folders if os.path.isdir(fold)]
+    
+    # Add datasets_DFX folders
+    datasets_dfx_folders = glob.glob(args.datasets_dfx_glob)
+    dfx_fake_folders = [fold.split('/')[-1] for fold in datasets_dfx_folders if os.path.isdir(fold)]
+    fake_folders.extend(dfx_fake_folders)
+    
     real_folders = args.real_folders
 
     print("Processing fake folders...")
@@ -39,8 +47,14 @@ def main():
         if not os.path.exists(os.path.join(output_dir, folder)):
             os.makedirs(os.path.join(output_dir, folder), exist_ok=True)
         try:
+            # Try WILD path first
             pattern = os.path.join(args.ff4all_base, '**', folder, '*.png')
             pattern_list = np.unique(glob.glob(pattern, recursive=True))
+            
+            # If not found in WILD, try datasets_DFX
+            if len(pattern_list) == 0:
+                pattern = os.path.join(args.datasets_dfx_base, folder, '*.png')
+                pattern_list = np.unique(glob.glob(pattern, recursive=True))
             np.random.shuffle(pattern_list)
             if len(pattern_list) < mean_size:
                 print(f"Not enough images in folder '{folder}' to create mean images. Skipping.")

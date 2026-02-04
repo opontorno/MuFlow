@@ -11,10 +11,10 @@ import utils
 import pdb
 import matplotlib.pyplot as plt
 
-run = 'ricercadellaricercadelbuono'
+run = 'res50_norm_aug_flatten'
 
-labels = np.load(f'~/MuFlow/FastFlow/logs/{run}/labels_best.npy')
-preds_ = np.load(f'~/MuFlow/FastFlow/logs/{run}/preds_best.npy')
+labels = np.load(f'~/projects/MuFlow/FastFlow/logs/{run}/labels_best.npy')
+preds_ = np.load(f'~/projects/MuFlow/FastFlow/logs/{run}/preds_best.npy')
 
 """likelihood_real = preds_[labels == 0][:1000]
 likelihood_fake = preds_[labels == 14]
@@ -93,7 +93,9 @@ def build_model(config, model_type):
     return model
 
 
-config = yaml.safe_load(open('/home/opontorno/MuFlow/FastFlow/configs/resnet18.yaml', "r"))
+
+
+config = yaml.safe_load(open('/home/opontorno/MuFlow/FastFlow/configs/resnet50.yaml', "r"))
 
 model = build_model(config, 'FastFlow')
 model.cuda()

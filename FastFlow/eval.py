@@ -13,7 +13,7 @@ import fastflow
 #import vanillaVAE as vae
 import utils
 
-import cv2
+import cv2, pdb
 import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,6 +28,42 @@ DM_CLOSED = ['Dall-E 3', 'Midjourney', 'Starry AI', 'Deep AI', 'Hotpot AI', 'Nvi
 
 MIX_2CLASS = ['StyleGAN', 'StyleGAN2', 'Stable DIffusion 3.5', 'Flux.1.1 Pro']
 
+
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default='configs/resnet18.yaml', help="path to config file")
+
+    parser.add_argument("--data", type=str, default='WILD', help="path to mvtec folder", choices=['FF++', 'WILD', 'progan'])
+    parser.add_argument("--reals", type=str, default='ffhq', help="reals dataset", choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'])
+    parser.add_argument("--test", type=str, help="test name")
+    parser.add_argument("--checkpoint", type=str, required=True, help="path to load checkpoint")
+    parser.add_argument('--gmm_checkpoint', type=str, help="path to GMM checkpoint (for GMM-based threshold)")
+    parser.add_argument('--threshold_path', type=str, help="path to threshold file (.npz or .npy)")
+    parser.add_argument('--lof_checkpoint', type=str, help="path to LOF model checkpoint (.pkl)")
+
+    parser.add_argument('--use_augs', type=int, default=0, choices=[0, 1], help="Whether to use data augmentation")
+    parser.add_argument('--use_fourier', type=int, default=0, choices=[0, 1], help="Whether to use Fourier transform")
+    parser.add_argument('--use_proj', type=int, default=0, choices=[0, 1], help="Whether to use projection layer")
+    parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
+    parser.add_argument('--model_type', type=str, choices=['FastFlow', 'VAE'], default='FastFlow', help="Choose the model to train")
+    parser.add_argument('--on_celeba', action='store_true', help="Use celeba dataset")
+    parser.add_argument('--num_workers', type=int, default=4, help="number of data loading workers")
+    parser.add_argument('--projection_type', type=str, default='conv', choices=['conv', 'mlp', 'autoencoder', 'identity'], help="Type of projection layer")
+    parser.add_argument('--pooling_type', type=str, default='mean', choices=['mean', 'flatten', 'max', 'mean_std'], help="Spatial pooling type: mean, flatten, max, or mean_std")
+    parser.add_argument('--n_components', type=int, default=1, help="Number of GMM components")
+
+    # Threshold method arguments
+    parser.add_argument('--use_lof', type=int, default=0, choices=[0, 1], help="Whether to use LOF (requires lof_checkpoint)")
+    parser.add_argument('--contamination', default='auto', help="Contamination rate for LOF")
+    parser.add_argument('--use_percentile', type=int, default=0, choices=[0, 1], help="Whether to use percentile")
+    parser.add_argument('--percentile', type=int, default=95, help="Percentile to use if use_percentile=True")
+
+    args = parser.parse_args()
+    
+    return args
+
 def create_dataloader(args, config, opt):
 
     attack_type = getattr(opt, 'attack_type', 'none')
@@ -40,7 +76,9 @@ def create_dataloader(args, config, opt):
         test_name=args.test,
         input_size=config["input_size"],
         is_train=False,
+        is_val=False,
         use_fourier=True if args.use_fourier == 1 else False,
+        use_augs=True if args.use_augs == 1 else False,
         attack_type=attack_type,
         attack_params=attack_params
     ).create_dataset()
@@ -63,14 +101,15 @@ def create_dataloader_w_celeba(args, config, opt):
     attack_type = getattr(opt, 'attack_type', 'none')
     attack_params = getattr(opt, 'attack_params', {})
 
-    # The data loading code remains the same
     test_dataset = dataset.Dataset_celeba(
         dataset_name=args.data,
         reals_name=args.reals,
         test_name=args.test,
         input_size=config["input_size"],
         is_train=False,
+        is_val=False,
         use_fourier=True if args.use_fourier == 1 else False,
+        use_augs=True if args.use_augs == 1 else False,
         attack_type=attack_type,
         attack_params=attack_params
     ).create_dataset()
@@ -99,9 +138,9 @@ def build_model(config, model_type, args):
     
     # Try new naming convention (with out_indices and pooling_type)
     if args.use_fourier == 1:
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}_{pooling_type}.npy"
+        gmm_parameters = f"{const.WORKING_DIR}/parameters/{args.n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}_{pooling_type}.npy"
     else:
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
+        gmm_parameters = f"{const.WORKING_DIR}/parameters/{args.n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
     
     gmm_values = np.load(gmm_parameters, allow_pickle=True).item() 
     print(f"Loading gmm parameters from {gmm_parameters}")
@@ -118,6 +157,7 @@ def build_model(config, model_type, args):
             backbone_weights=args.backbone_weights if hasattr(args, 'backbone_weights') and args.backbone_weights else None,
             out_indices=config.get("out_indices", [1, 2, 3]),  # Default [1,2,3] if not specified
             use_proj=True if hasattr(args, 'use_proj') and args.use_proj == 1 else False,
+            projection_type=getattr(args, 'projection_type', 'conv'),
             pooling_type=pooling_type
         )
         print(
@@ -154,22 +194,9 @@ def eval_once(dataloader, model, epoch=None, model_type="FastFlow", gmm=None, th
     # Visualization: plot real vs fake separation
     likelihood_real = preds_[labels == 0]
     likelihood_fake = preds_[labels > 0]
-    
-    plt.figure(figsize=(10, 6))
-    sns.kdeplot(likelihood_real, label='Real', color='blue')
-    sns.kdeplot(likelihood_fake, label='Fake', color='orange')
-    plt.title('Real vs Fake')
-    plt.xlabel('Value')
-    plt.ylabel('Density')
-    plt.legend()
-    plt.savefig(const.CHECKPOINT_DIR+"/real_fake_separation.png")
-    plt.close()
 
     # Apply threshold or GMM/LOF to get predictions
-    if gmm:
-        # Use GMM prediction
-        preds = (gmm.predict(np.array(preds_).reshape(-1,1)) < 0).astype(int)
-    elif threshold_info and 'lof' in threshold_info:
+    if threshold_info and 'lof' in threshold_info:
         # Use LOF prediction
         lof = threshold_info['lof']
         preds = (lof.predict(np.array(preds_).reshape(-1,1)) < 0).astype(int)
@@ -178,7 +205,7 @@ def eval_once(dataloader, model, epoch=None, model_type="FastFlow", gmm=None, th
         threshold = threshold_info['threshold']
         preds = (preds_ > threshold).astype(int)
     else:
-        raise ValueError("Either gmm or threshold_info must be provided")
+        raise ValueError("Either lof or threshold_info must be provided")
     
     # --- INIZIO NUOVA VALUTAZIONE BILANCIATA (One-vs-All) ---
     # Print the accuracy only for class 0 (real class)
@@ -283,10 +310,20 @@ def evaluate(args):
 
     # Load threshold_info: can be a dict (from .npz) or numpy array (legacy .npy)
     threshold_info = None
-    if args.threshold_path:
-        if args.threshold_path.endswith('.npz'):
+    threshold_path = args.threshold_path
+    
+    # If threshold_path not provided, try to find it in the same directory as checkpoint
+    if not threshold_path:
+        checkpoint_dir = os.path.dirname(args.checkpoint)
+        potential_threshold_path = os.path.join(checkpoint_dir, "thresholds.npz")
+        if os.path.exists(potential_threshold_path):
+            threshold_path = potential_threshold_path
+            print(f"Found threshold file: {threshold_path}")
+    pdb.set_trace()
+    if threshold_path:
+        if threshold_path.endswith('.npz'):
             # New format: dictionary with threshold, mean, std, losses
-            loaded = np.load(args.threshold_path, allow_pickle=True)
+            loaded = np.load(threshold_path, allow_pickle=True)
             threshold_info = {key: loaded[key] for key in loaded.files}
             # If 'threshold' is an array, extract scalar
             if 'threshold' in threshold_info and isinstance(threshold_info['threshold'], np.ndarray):
@@ -294,7 +331,7 @@ def evaluate(args):
                     threshold_info['threshold'] = float(threshold_info['threshold'])
         else:
             # Legacy format: just a dict with mean and std
-            threshold_data = np.load(args.threshold_path, allow_pickle=True)
+            threshold_data = np.load(threshold_path, allow_pickle=True)
             if isinstance(threshold_data, np.ndarray) and threshold_data.dtype == object:
                 # It's a dict stored as object array
                 threshold_info = threshold_data.item()
@@ -302,13 +339,21 @@ def evaluate(args):
                 # Assume it's mean/std values
                 threshold_info = {'mean': threshold_data[0], 'std': threshold_data[1], 'threshold': threshold_data[0] + 3*threshold_data[1]}
     
-    # Load LOF model if provided
-    if args.use_lof == 1 and hasattr(args, 'lof_checkpoint') and args.lof_checkpoint:
-        lof = joblib.load(args.lof_checkpoint)
+    # Load LOF model if provided (or auto-detect in checkpoint dir)
+    lof_checkpoint = args.lof_checkpoint if hasattr(args, 'lof_checkpoint') else None
+    if not lof_checkpoint and args.use_lof == 1:
+        checkpoint_dir = os.path.dirname(args.checkpoint)
+        potential_lof_path = os.path.join(checkpoint_dir, "lof_model.pkl")
+        if os.path.exists(potential_lof_path):
+            lof_checkpoint = potential_lof_path
+            print(f"Found LOF model: {lof_checkpoint}")
+    
+    if args.use_lof == 1 and lof_checkpoint:
+        lof = joblib.load(lof_checkpoint)
         if threshold_info is None:
             threshold_info = {}
         threshold_info['lof'] = lof
-        print(f"Loaded LOF model from {args.lof_checkpoint}")
+        print(f"Loaded LOF model from {lof_checkpoint}")
 
     attacks_configs = [
         ('none', {}),
@@ -352,36 +397,6 @@ def evaluate(args):
             test_dataloader, class2idx = create_dataloader_w_celeba(args, config, opt)
             eval_once(test_dataloader, model, model_type=args.model_type, gmm=gmm, threshold_info=threshold_info, class2idx=class2idx)
 
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default='configs/resnet18.yaml', help="path to config file")
-
-    parser.add_argument("--data", type=str, default='FF4ALL', help="path to mvtec folder", choices=['FF++', 'FF4ALL', 'WILD', 'progan'])
-    parser.add_argument("--reals", type=str, default='ffhq', help="reals dataset", choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'])
-    parser.add_argument("--test", type=str, help="test name")
-    parser.add_argument("--checkpoint", type=str, required=True, help="path to load checkpoint")
-    parser.add_argument('--gmm_checkpoint', type=str, help="path to GMM checkpoint (for GMM-based threshold)")
-    parser.add_argument('--threshold_path', type=str, help="path to threshold file (.npz or .npy)")
-    parser.add_argument('--lof_checkpoint', type=str, help="path to LOF model checkpoint (.pkl)")
-
-    parser.add_argument('--use_fourier', type=int, default=0, choices=[0, 1], help="Whether to use Fourier transform")
-    parser.add_argument('--use_proj', type=int, default=0, choices=[0, 1], help="Whether to use projection layer")
-    parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
-    parser.add_argument('--model_type', type=str, choices=['FastFlow', 'VAE'], default='FastFlow', help="Choose the model to train")
-    parser.add_argument('--on_celeba', action='store_true', help="Use celeba dataset")
-    parser.add_argument('--num_workers', type=int, default=4, help="number of data loading workers")
-    parser.add_argument('--pooling_type', type=str, default='mean', choices=['mean', 'flatten'], help="Spatial pooling type: mean or flatten")
-
-    # Threshold method arguments
-    parser.add_argument('--use_lof', type=int, default=0, choices=[0, 1], help="Whether to use LOF (requires lof_checkpoint)")
-    parser.add_argument('--contamination', default='auto', help="Contamination rate for LOF")
-    parser.add_argument('--use_percentile', type=int, default=0, choices=[0, 1], help="Whether to use percentile")
-    parser.add_argument('--percentile', type=int, default=95, help="Percentile to use if use_percentile=True")
-
-    args = parser.parse_args()
-    
-    return args
 
 if __name__ == "__main__":
     args = parse_args()

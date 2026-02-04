@@ -19,35 +19,31 @@ import pdb
 
 # === Argument Parser ===
 parser = argparse.ArgumentParser(description='Generate GMM parameters for FastFlow')
-parser.add_argument('--model_name', type=str, default='resnet18', 
-                    help='Backbone model name')
-parser.add_argument('--reals', type=str, default='ffhq', 
-                    choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'],
-                    help='Real images dataset')
-parser.add_argument('--use_fourier', action='store_true',
-                    help='Use Fourier magnitude spectrum instead of RGB')
-parser.add_argument('--pooling_type', type=str, default='mean',
-                    choices=['mean', 'flatten'],
-                    help='Spatial pooling type: mean or flatten')
+parser.add_argument('--model_name', type=str, default='resnet50', help='Backbone model name')
+parser.add_argument('--reals', type=str, default='ffhq', choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'], help='Real images dataset')
+parser.add_argument('--use_fourier', action='store_true', help='Use Fourier magnitude spectrum instead of RGB')
 args = parser.parse_args()
 
 # === Hyperparameters ===
 model_name = args.model_name
 reals = args.reals
 use_fourier = args.use_fourier
-pooling_type = args.pooling_type
 
 config_path = f"{const.WORKING_DIR}/FastFlow/configs/{model_name}.yaml" 
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 print(f"Use Fourier: {use_fourier}")
 print(f"Reals dataset: {reals}")
-print(f"Pooling type: {pooling_type}")
-
 
 # === Model Setup ===
 out_indices = config.get("out_indices", [1, 2, 3])  # Get from config or default
 print(f"Using out_indices: {out_indices}")
+
+pooling_type = config.get("pooling_type", "mean")  # Get from config or default
+print(f"Using pooling_type: {pooling_type}")
+
+n_components = config.get("gmm_n_components", 1)  # Get from config or default
+print(f"Number of GMM components: {n_components}")
 
 if config['backbone_name'] in [const.BACKBONE_CAIT, const.BACKBONE_DEIT]:
     model = timm.create_model(config['backbone_name'], pretrained=True, in_chans=3)
@@ -197,8 +193,19 @@ for i, img_path in tqdm(enumerate(real_sample), total=len(real_sample)):
         if pooling_type == 'mean':
             # Spatial pooling: (B, C, H, W) -> (B, C)
             feats_.append(feats.mean([2, 3]).flatten().cpu().numpy())
-        else:  # flatten
-            # Flatten spatial dims: (B, C, H, W) -> (B, C*H*W)
+        elif pooling_type == 'max':
+            # Max pooling: (B, C, H, W) -> (B, C)
+            feats_.append(feats.flatten(2).max(-1)[0].cpu().numpy().squeeze(0))
+        elif pooling_type == 'mean_std':
+            # Mean + Std concatenation: (B, C, H, W) -> (B, 2*C)
+            mean_feats = feats.mean([2, 3]).flatten().cpu().numpy()
+            std_feats = feats.std([2, 3]).flatten().cpu().numpy()
+            feats_.append(np.concatenate([mean_feats, std_feats]))
+        elif pooling_type == 'flatten':
+            # Mean on channels, then flatten spatial: (B, C, H, W) -> (B, C, H) -> (B, C*H)
+            feats_.append(feats.mean(-1).flatten(1).cpu().numpy().squeeze(0))
+        else:  # full_flatten
+            # Full flatten: (B, C, H, W) -> (B, C*H*W)
             feats_.append(feats.flatten(1).cpu().numpy().squeeze(0))
     real_features.append(feats_)
 
@@ -207,7 +214,7 @@ print("Feature extraction complete!")
 gmm = {"real": []}
 
 print("\nFitting Gaussian Mixture Models...")
-clf = GaussianMixture(n_components=1, reg_covar=1e-6, random_state=42)
+clf = GaussianMixture(n_components=n_components, reg_covar=1e-6, random_state=42)
 for i in range(num_layers):
     real_features_ = np.stack([feats[i] for feats in real_features])
     print(f"  Layer {i} (out_indices[{i}]={out_indices[i]}): shape {real_features_.shape}")
@@ -215,11 +222,10 @@ for i in range(num_layers):
     clf.fit(real_features_)
     gmm["real"].append([clf.means_, clf.covariances_])
 
-# Generate output filename based on parameters
 if use_fourier:
-    output_filename = f"{const.WORKING_DIR}/parameters/gmm_parameters_{model_name}_indices_{str(out_indices)}_fourier_{reals}_{config['input_size']}_{pooling_type}.npy"
+    output_filename = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{model_name}_indices_{str(out_indices)}_fourier_{reals}_{config['input_size']}_{pooling_type}.npy"
 else:
-    output_filename = f"{const.WORKING_DIR}/parameters/gmm_parameters_{model_name}_indices_{out_indices}_{reals}_{config['input_size']}_{pooling_type}.npy"
+    output_filename = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{model_name}_indices_{str(out_indices)}_{reals}_{config['input_size']}_{pooling_type}.npy"
 
 print(f"\nSaving GMM parameters to: {output_filename}")
 np.save(output_filename, gmm)

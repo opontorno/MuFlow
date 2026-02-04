@@ -16,7 +16,7 @@ from sklearn.mixture import GaussianMixture
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # === Hyperparameters ===
-model_name = "resnet18"
+model_name = "resnet50"
 config_path = f"FastFlow/configs/{model_name}.yaml"
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
@@ -24,6 +24,9 @@ print("Model config: ", config)
 # === Model Setup ===
 out_indices = config.get("out_indices", [1, 2, 3])  # Get from config or default
 print(f"Using out_indices: {out_indices}")
+
+pooling_type = config.get("pooling_type", "mean")  # Get from config or default
+print(f"Using pooling_type: {pooling_type}")
 
 model = timm.create_model(model_name, pretrained=True, features_only=True, in_chans=3, out_indices=out_indices)
 model.eval()
@@ -82,7 +85,10 @@ def build_generators_dict(patterns_dict):
         'Tencent Hunyuan': glob(patterns_dict.get('Tencent Hunyuan', '')),
         'Dall-E 3': glob(patterns_dict.get('Dall-E 3', '')),
         'StyleGAN': glob(patterns_dict.get('StyleGAN', '')),
-        'Nvidia Sana PAG': glob(patterns_dict.get('Nvidia Sana PAG', ''))
+        'Nvidia Sana PAG': glob(patterns_dict.get('Nvidia Sana PAG', '')),
+        'StarGAN': glob(patterns_dict.get('STARGAN', '')),
+        'AttGAN': glob(patterns_dict.get('ATTGAN', '')),
+        'GDWCT': glob(patterns_dict.get('GDWCT', ''))
     }
 
 
@@ -117,8 +123,15 @@ def plot_generators_grid(generators_dict, save_path, cols=6):
     print(f"Saved grid to {save_path}")
 
 
-def extract_features_by_class(patterns_dict, sample_size=100, num_layers=3):
-    """Extract features from images grouped by class/generator."""
+def extract_features_by_class(patterns_dict, sample_size=100, num_layers=3, pooling_type='mean'):
+    """Extract features from images grouped by class/generator.
+    
+    Args:
+        patterns_dict: Dictionary mapping labels to file patterns
+        sample_size: Number of samples per class
+        num_layers: Number of feature layers to extract
+        pooling_type: Type of spatial pooling ('mean', 'max', 'mean_std', 'flatten')
+    """
     features_by_class = {}
     labels = []
     
@@ -135,7 +148,24 @@ def extract_features_by_class(patterns_dict, sample_size=100, num_layers=3):
             try:
                 features = get_features_from_path(img_path)
                 for i in range(len(features)):
-                    vec = features[i].mean(dim=(2, 3)).flatten().cpu().numpy()
+                    feats = features[i]
+                    
+                    # Apply pooling based on pooling_type
+                    if pooling_type == 'mean':
+                        # Spatial pooling: (B, C, H, W) -> (B, C)
+                        vec = feats.mean(dim=(2, 3)).flatten().cpu().numpy()
+                    elif pooling_type == 'max':
+                        # Max pooling: (B, C, H, W) -> (B, C)
+                        vec = feats.flatten(2).max(-1)[0].cpu().numpy().squeeze(0)
+                    elif pooling_type == 'mean_std':
+                        # Mean + Std concatenation: (B, C, H, W) -> (B, 2*C)
+                        mean_feats = feats.mean(dim=(2, 3)).flatten().cpu().numpy()
+                        std_feats = feats.std(dim=(2, 3)).flatten().cpu().numpy()
+                        vec = np.concatenate([mean_feats, std_feats])
+                    else:  # flatten
+                        # Mean on channels, then flatten spatial: (B, C, H, W) -> (B, H, W) -> (B, H*W)
+                        vec = feats.mean(1).flatten(1).cpu().numpy().squeeze(0)
+                    
                     layer_features[i].append(vec)
             except Exception as e:
                 print(f"Error processing {img_path}: {e}")
@@ -203,28 +233,34 @@ def plot_tsne_analysis(features_by_class, colors_dict, save_prefix, num_layers=N
 colors = {
     'Leonardo AI': 'lightcoral',
     'Flux.1': 'lightskyblue',
-    'ffhq': 'darkblue',
+
+    'ffhq': 'black',
+    'celeba_hq': 'crimson',
+
     'Stable DIffusion 3.5': 'lightseagreen',
-    'Freepik': 'lightcyan',
-    'Starry AI': 'lightpink',
-    'StyleGAN3': 'plum',
+    'Freepik': 'paleturquoise',
+    'Starry AI': 'hotpink',
+    'StyleGAN3': 'mediumpurple',
     'Stable Diffusion XL': 'lightgreen',
     'Stable Diffusion Attend and Excite': 'palegreen',
-    'SD Attend and Excite': 'palegreen',
+    'SD Attend and Excite': 'mediumspringgreen',
     'Dall-E': 'lightsteelblue',
     'Midjourney': 'violet',
-    'Stable Cascade': 'lightblue',
+    'Stable Cascade': 'cornflowerblue',
     'Adobe Firefly': 'lightsalmon',
     'Flux.1.1 Pro': 'khaki',
-    'Deep AI': 'lightgoldenrodyellow',
+    'Deep AI': 'gold',
     'StyleGAN2': 'mediumaquamarine',
-    'celeba_hq': 'darkgoldenrod',
-    'Hotpot AI': 'lightcoral',
-    'Tencent Hunyuan': 'lightgray',
+    'Hotpot AI': 'salmon',
+    'Tencent Hunyuan': 'silver',
     'Dall-E 3': 'gainsboro',
-    'StyleGAN': 'lightcoral',
-    'Nvidia Sana PAG': 'lightyellow'
+    'StyleGAN': 'rosybrown',
+    'Nvidia Sana PAG': 'lemonchiffon',
+    'StarGAN': 'steelblue',
+    'AttGAN': 'orchid',
+    'GDWCT': 'yellowgreen'
 }
+
 
 
 # ============================================================================
@@ -253,6 +289,13 @@ if os.path.exists(open_set_path):
     for gen in generators:
         patterns[gen] = os.path.join(open_set_path, gen, '*.png')
 
+dfx_common_path = '/media/orazio_mattia_group/ad4dd/datasets_DFX'
+if os.path.exists(dfx_common_path):
+    dfx_generators = [folder for folder in os.listdir(dfx_common_path) 
+                      if os.path.isdir(os.path.join(dfx_common_path, folder))]
+    for gen in dfx_generators:
+        patterns[gen] = os.path.join(dfx_common_path, gen, '*.png')
+
 # Add real image datasets
 patterns['ffhq'] = '/media/orazio_mattia_group/ad4dd/ffhq/*/*.png'
 patterns['celeba_hq'] = '/media/orazio_mattia_group/ad4dd/celeba_hq/*/*/*.jpg'
@@ -266,7 +309,7 @@ plot_generators_grid(generators_dict_single, f'.pictures/analysis-{model_name}_s
 
 # Extract features
 print("Extracting features from single images...")
-features_by_class_single, labels_single = extract_features_by_class(patterns, sample_size=100, num_layers=num_layers)
+features_by_class_single, labels_single = extract_features_by_class(patterns, sample_size=100, num_layers=num_layers, pooling_type=pooling_type)
 
 # Run t-SNE analysis and plot
 print("Running t-SNE analysis on single images...")
@@ -299,7 +342,7 @@ plot_generators_grid(generators_dict_means, f'.pictures/analysis-{model_name}_me
 
 # Extract features from mean images
 print("Extracting features from mean images...")
-features_by_class_means, labels_means = extract_features_by_class(patterns_means, sample_size=100, num_layers=num_layers)
+features_by_class_means, labels_means = extract_features_by_class(patterns_means, sample_size=100, num_layers=num_layers, pooling_type=pooling_type)
 
 # Run t-SNE analysis and plot
 print("Running t-SNE analysis on mean images...")
