@@ -15,8 +15,9 @@ import utils
 import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.stats import norm
 
-from sklearn.metrics import accuracy_score, average_precision_score
+from sklearn.metrics import accuracy_score, average_precision_score, roc_auc_score
 from sklearn.neighbors import LocalOutlierFactor
 
 
@@ -272,13 +273,16 @@ def compute_threshold(val_dataloader, model, model_type="FastFlow", use_lof=Fals
         result['threshold'] = threshold
     else:
         if threshold_type == 'standard':
-            lambda_ = 3
+            alpha = 0.01
         elif threshold_type == 'strict':
-            lambda_ = 2
-        else:  # threshold_type == 'very_strict':
-            lambda_ = 1
-        threshold = mean + lambda_ * std
-        result['threshold'] = threshold
+            alpha = 0.05
+        else:  # very_strict
+            alpha = 0.1
+        z = norm.ppf(1 - alpha)
+        l_threshold = mean - z * std
+        u_threshold = mean + z * std
+        result['l_threshold'] = l_threshold
+        result['u_threshold'] = u_threshold
     
     return result
 
@@ -315,16 +319,19 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
         preds = (lof.predict(np.array(preds_).reshape(-1,1)) < 0).astype(int)
     else:
         # Standard threshold comparison: loss > threshold means anomaly
-        threshold = threshold_info['threshold']
-        preds = (preds_ > threshold).astype(int)
+        l_threshold = threshold_info['l_threshold']
+        u_threshold = threshold_info['u_threshold']
+        preds = ((preds_ < l_threshold) | (preds_ > u_threshold)).astype(int)
     
     if epoch % 50 == 0:
         likelihood_real = preds_[labels == 0]
-        likelihood_fake = preds_[labels > 0]
+        likelihood_ood_real = preds_[labels == 99]  # Out-of-distribution real class
+        likelihood_fake = preds_[(labels > 0) & (labels != 99)]  # Exclude OOD real class if present
 
         plt.figure(figsize=(10, 6))
         
         sns.kdeplot(likelihood_real, label='Real', color='blue')
+        sns.kdeplot(likelihood_ood_real, label='OOD Real', color='green')
         sns.kdeplot(likelihood_fake, label='Fake', color='orange')
 
         plt.title('Real vs Fake')
@@ -333,7 +340,7 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
         plt.legend()
         plt.savefig(const.CHECKPOINT_DIR+"/real_fake_likelihoods_{}.png".format(epoch))
     
-    aps, accs, cls = [], [], []
+    aps, accs, rocs, cls = [], [], [], []
     
     # Dictionary to store per-class metrics for wandb logging
     per_class_metrics = {}
@@ -352,6 +359,8 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
     np.random.seed(42)
     
     for c in classes[1:]:
+        if c == 99:  # Skip OOD real class for this loop
+            continue
         
         idx = (labels == c)
         y_true_c = labels[idx]
@@ -379,35 +388,59 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
         
         y_true_binary = (y_true_balanced > 0).astype(np.int8)
         
-        ap = average_precision_score(y_true_binary, y_pred_balanced)
         acc0 = accuracy_score(y_true_binary, y_pred_balanced)
+        ap = average_precision_score(y_true_binary, y_pred_balanced)
+        roc = roc_auc_score(y_true_binary, y_pred_balanced)
         
-        print(f"  > Class {class_name} (N={min_len*2}): \t AP = {ap:.4f}, \t Accuracy = {acc0:.4f}, \t Loss = {loss_mean_fake:.4f}±{loss_std_fake:.4f}")
+        print(f"  > Class {class_name} (N={min_len*2}): \t Accuracy = {acc0:.4f}, \t AP = {ap:.4f}, \t ROC AUC = {roc:.4f}, \t Loss = {loss_mean_fake:.4f}±{loss_std_fake:.4f}")
         
         # Store metrics for wandb logging
         per_class_metrics[f"loss_per_class/{class_name}"] = loss_mean_fake
         per_class_metrics[f"loss_std_per_class/{class_name}"] = loss_std_fake
         per_class_metrics[f"ap_per_class/{class_name}"] = ap
         per_class_metrics[f"acc_per_class/{class_name}"] = acc0
-        
+        per_class_metrics[f"roc_per_class/{class_name}"] = roc
         aps.append(ap)
         accs.append(acc0)
+        rocs.append(roc)
         cls.append(c)
 
-    mean_ap = np.mean(aps)
     mean_acc = np.mean(accs)
+    mean_ap = np.mean(aps)
+    mean_roc = np.mean(rocs)
     
     print("-" * 30)
     print(f"Average Accuracy: {mean_acc:.4f}")
     print(f"Average Precision: {mean_ap:.4f}")
+    print(f"Average ROC AUC: {mean_roc:.4f}")
     print("="*30 + "\n")
 
+    # Log metrics for OOD real class (class 99)
+    idx = (labels == 99)
+    y_true_ood_real = labels[idx]
+    y_pred_ood_real = preds[idx]
+    class_ood_real_name = class2idx[99] if class2idx else "OOD_Real"
+
+    loss_mean_ood_real = np.mean(preds_[labels == 99])
+    loss_std_ood_real = np.std(preds_[labels == 99])
+
+    y_true_ood_real_binary = np.zeros(len(y_true_ood_real), dtype=np.int8)  # All real class
+    acc_ood_real = accuracy_score(y_true_ood_real_binary, y_pred_ood_real)
+    ap_ood_real = average_precision_score(y_true_ood_real_binary, y_pred_ood_real)
+    roc_ood_real = roc_auc_score(y_true_ood_real_binary, y_pred_ood_real)
+    print(f"  > Class {class_ood_real_name} (N={len(y_true_ood_real)}): \t Accuracy = {acc_ood_real:.4f}, \t AP = {ap_ood_real:.4f}, \t ROC AUC = {roc_ood_real:.4f}, \t Loss = {loss_mean_ood_real:.4f}±{loss_std_ood_real:.4f}")
+    
+    per_class_metrics[f"loss_per_class/{class_ood_real_name}"] = loss_mean_ood_real
+    per_class_metrics[f"loss_std_per_class/{class_ood_real_name}"] = loss_std_ood_real
+    per_class_metrics[f"acc_per_class/{class_ood_real_name}"] = acc_ood_real
+    per_class_metrics[f"ap_per_class/{class_ood_real_name}"] = ap_ood_real
+    per_class_metrics[f"roc_per_class/{class_ood_real_name}"] = roc_ood_real
     
     # Log test statistics (note: preds_ contains loss values, not predictions)
     test_loss_real_mean = np.mean(preds_[labels == 0])
-    test_loss_fake_mean = np.mean(preds_[labels > 0])
+    test_loss_fake_mean = np.mean(preds_[(labels > 0) & (labels != 99)])  # Exclude OOD real class if present
     test_loss_real_std = np.std(preds_[labels == 0]) if len(preds_[labels == 0]) > 0 else 0
-    test_loss_fake_std = np.std(preds_[labels > 0]) if len(preds_[labels > 0]) > 0 else 0
+    test_loss_fake_std = np.std(preds_[(labels > 0) & (labels != 99)]) if len(preds_[(labels > 0) & (labels != 99)]) > 0 else 0
     
     # Prepare wandb log dictionary with overall metrics
     wandb_log_dict = {
@@ -467,7 +500,8 @@ def train(args, config):
             threshold_info = compute_threshold(val_dataloader, model, args.model_type, use_lof=True if args.use_lof==1 else False, contamination=args.contamination, use_percentile=True if args.use_percentile==1 else False, percentile=args.percentile, threshold_type=args.threshold_type)
             
             # Log validation threshold statistics
-            threshold_val = threshold_info['threshold']
+            l_threshold_val = threshold_info['l_threshold']
+            u_threshold_val = threshold_info['u_threshold']
             val_mean = threshold_info.get('mean', None)
             val_std = threshold_info.get('std', None)
                 
@@ -477,7 +511,8 @@ def train(args, config):
             log_dict = {
                 "Train Loss Mean": train_mean,
                 "Train Loss Std": train_std,
-                "Threshold": threshold_val
+                "Lower Threshold": l_threshold_val,
+                "Upper Threshold": u_threshold_val
             }
             if val_mean is not None:
                 log_dict["Val Loss Mean"] = val_mean
@@ -513,7 +548,8 @@ def train(args, config):
                 # Save threshold information (only save fields that exist)
                 # Note: LOF object cannot be saved in npz, only with joblib
                 save_dict = {
-                    'threshold': threshold_info['threshold'],
+                    'l_threshold': threshold_info['l_threshold'],
+                    'u_threshold': threshold_info['u_threshold'],
                     'losses': threshold_info['losses']
                 }
                 if 'mean' in threshold_info:

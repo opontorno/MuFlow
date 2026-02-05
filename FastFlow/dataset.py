@@ -13,6 +13,7 @@ from collections import Counter
 from random import choices
 import pandas as pd
 import pdb
+from tqdm import tqdm
 
 # Add parent directory to path to import fourier_utils
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -165,17 +166,14 @@ class Dataset:
 
         elif self.dataset_name == 'WILD':
             if self.reals_name == 'ffhq':
-                # test_folders = ['014000', '022000']
-                # root_dir = [f"{c.DATA_DIR}/ffhq/{fol}" for fol in os.listdir(f"{c.DATA_DIR}/ffhq") if fol not in test_folders] if self.is_train \
-                #             else [f"{c.DATA_DIR}/ffhq/{fol}" for fol in test_folders] + [f"{c.DATA_DIR}/WILD/**/**"]
                 root_dir = [f"{c.DATA_DIR}/ffhq/*"] if self.is_train \
-                            else [f"{c.DATA_DIR}/ffhq/*"] + [f"{c.DATA_DIR}/WILD/**/**"] + [f"{c.DATA_DIR}/datasets_DFX/**"]
-                file_pattern = "*.png" 
+                            else [f"{c.DATA_DIR}/ffhq/*"] + [f"{c.DATA_DIR}/WILD/**/**"] + [f"{c.DATA_DIR}/datasets_DFX/**"] + [f"{c.DATA_DIR}/celeba_hq/val/**/*"]
+                file_pattern = "*.*g" 
+            #########################################################adjust celeba in val#############################
             elif self.reals_name == 'celeba_hq':
                 root_dir = [f"{c.DATA_DIR}/celeba_hq/train/*"] if self.is_train \
                             else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/WILD/*"] + [f"{c.DATA_DIR}/datasets_DFX/**"]
                 file_pattern = "**/*.*g" 
-            #########################################################check effectivness#############################
             elif self.reals_name == 'ffhq+celeba_hq':
                 root_dir = [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*"] if self.is_train \
                             else [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*", f"{c.DATA_DIR}/WILD/*"] + [f"{c.DATA_DIR}/datasets_DFX/**"]
@@ -191,9 +189,9 @@ class Dataset:
                 root_dir=root_dir,
                 file_pattern=file_pattern,
                 input_size=self.input_size,
-                use_valid=True,
                 is_train=self.is_train,
                 is_val=self.is_val,
+                reals_name=self.reals_name,
                 use_fourier=self.use_fourier,
                 attack_type=self.attack_type,
                 attack_params=self.attack_params,
@@ -204,8 +202,8 @@ class Dataset:
             raise ValueError(f"Unsupported dataset: {self.dataset_name}")
 
 class DeepFakeDataset(Dataset):
-    def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, is_val=False,
-                 use_valid=False, use_fourier=False, attack_type='none', attack_params=None, seed=124, use_augs=True):
+    def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, is_val=False, reals_name='ffhq',
+                 use_fourier=False, attack_type='none', attack_params=None, seed=124, use_augs=True):
         """
         Args:
             root_dir (str): Path to the root folder containing image data.
@@ -235,11 +233,23 @@ class DeepFakeDataset(Dataset):
         self.use_fourier = use_fourier
         self.classes = np.unique([f.split("/")[-2] for f in self.image_files if (f.split("/")[-3] != "ffhq" and f.split("/")[-4] != "celeba_hq")])
         self.class_to_idx = {cls: idx + 1 for idx, cls in enumerate(self.classes)}
+        ood_reals = 'celeba_hq' if reals_name == 'ffhq' else 'ffhq'
+        self.class_to_idx[np.str_(ood_reals)] = 99  # Out-of-distribution real class
         
-        self.labels = [0 if ("ffhq" in image_file or "celeba_hq" in image_file) else self.class_to_idx[image_file.split("/")[-2]] for image_file in self.image_files]
+        self.labels = []
+        for image_file in self.image_files:
+            if reals_name in image_file:
+                self.labels.append(0)
+            elif ood_reals in image_file:
+                self.labels.append(99)  # Out-of-distribution real class
+            else:
+                class_name = image_file.split("/")[-2]
+                self.labels.append(self.class_to_idx[class_name])
+
+        # self.labels = [0 if ("ffhq" in image_file or "celeba_hq" in image_file) else self.class_to_idx[image_file.split("/")[-2]] for image_file in self.image_files]
         
         if not self.is_train:      
-            min_count = min(sum(1 for label in self.labels if label != 0), self.labels.count(0))
+            min_count = min(sum(1 for label in self.labels if (label != 0 and label != 99)), self.labels.count(0))
             balanced_items = []
             for label in sorted(set(self.labels)):  # Sort labels for consistency
                 label_items = [(img, lbl) for img, lbl in zip(self.image_files, self.labels) if lbl == label]

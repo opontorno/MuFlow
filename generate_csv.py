@@ -135,21 +135,26 @@ print("=" * 60)
 celeba_train_pattern = "/media/orazio_mattia_group/ad4dd/celeba_hq/train/*/*.jpg"
 celeba_train_files = glob.glob(celeba_train_pattern)
 
-for file_path in celeba_train_files:
+random.shuffle(celeba_train_files)
+n_train_celeba = int(len(celeba_train_files) * 0.8)
+n_val_celeba = len(celeba_train_files) - n_train_celeba
+
+for file_path in celeba_train_files[:n_train_celeba]:
     csv_data.append([file_path, "train"])
-
-print(f"CelebA HQ Train: {len(celeba_train_files)} images")
-
-# Val (now we put it as "val" instead of "test")
-celeba_val_pattern = "/media/orazio_mattia_group/ad4dd/celeba_hq/val/*/*.jpg"
-celeba_val_files = glob.glob(celeba_val_pattern)
-
-for file_path in celeba_val_files:
+for file_path in celeba_train_files[n_train_celeba:]:
     csv_data.append([file_path, "val"])
 
-print(f"CelebA HQ Val: {len(celeba_val_files)} images")
-print(f"CelebA HQ Total: {len(celeba_train_files) + len(celeba_val_files)} images\n")
+print(f"CelebA HQ Train: {n_train_celeba} images")
+print(f"CelebA HQ Val: {n_val_celeba} images")
 
+celeba_test_pattern = "/media/orazio_mattia_group/ad4dd/celeba_hq/val/*/*.jpg"
+celeba_test_files = glob.glob(celeba_test_pattern)
+
+for file_path in celeba_test_files:
+    csv_data.append([file_path, "test"])
+
+print(f"CelebA HQ Test: {len(celeba_test_files)} images")
+print(f"CelebA HQ Total: {len(celeba_train_files) + len(celeba_test_files)} images\n")
 # ============================================================================
 # Save the CSV
 # ============================================================================
