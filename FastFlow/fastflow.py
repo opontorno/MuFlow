@@ -17,15 +17,11 @@ def gaussian_nll_loss(output, mu, cov, log_jac_det):
     B, d = output.shape
     
     cov_inv = torch.linalg.inv(cov)
-
     diff = (output - mu).reshape(B, d, 1) # Shape: (B, d, 1)  TODO: controllare shape output
-
     mahalanobis = torch.matmul(diff.transpose(1, 2), torch.matmul(cov_inv, diff)).squeeze() # Mahalanobis distance: (x - mu)^T Σ^{-1} (x - mu)
-    #log_det_cov = torch.logdet(cov)    
-    #loss = 0.5 * (mahalanobis + log_det_cov) - log_jac_det
     loss = 0.5 * mahalanobis - log_jac_det
 
-    return loss
+    return loss, mahalanobis
 
 
 def subnet_conv_func(kernel_size, hidden_ratio):
@@ -203,8 +199,7 @@ class FastFlow(nn.Module):
             features = projected_features
 
         loss = []
-        outputs = []
-        log_jac_dets = []
+        mahalanobis = []
         for i, feature in enumerate(features):
             output, log_jac_det = self.nf_flows[i](features[i])
             mu = self.means[i]
@@ -213,9 +208,6 @@ class FastFlow(nn.Module):
             mu = torch.tensor(mu, device=output.device)
             cov = torch.tensor(cov, device=output.device)
 
-            #    loss += torch.mean(
-            #         0.5 / det(s)**2 * torch.sum((output-m)**2, dim=(1, 2, 3)) - log_jac_det
-            #     )
             if self.pooling_type == 'mean':
                 # Spatial pooling: (B, C, H, W) -> (B, C)
                 output = output.mean((2,3))
@@ -234,33 +226,11 @@ class FastFlow(nn.Module):
                 # Full flatten: (B, C, H, W) -> (B, C*H*W)
                 output = output.flatten(1)
 
-            # if i==2:
-            loss.append(gaussian_nll_loss(output=output, mu=mu, cov=cov, log_jac_det=log_jac_det))
+            loss_, maha_ = gaussian_nll_loss(output=output, mu=mu, cov=cov, log_jac_det=log_jac_det)
+            loss.append(loss_)
+            mahalanobis.append(maha_)
         
-        outputs.append(output)
-        log_jac_dets.append(log_jac_det)
-        
-        ret = {"loss": torch.stack(loss, dim=1).mean(1)}
-
-        """if not self.training:
-            anomaly_map_list = []
-            anomaly_prob_list = []
-            for (output, log_jac_det) in zip(outputs, log_jac_dets):    
-                log_prob = -torch.mean(output**2, dim=1, keepdim=True) * 0.5
-                prob = torch.exp(log_prob)
-                a_map = F.interpolate(
-                    -prob,
-                    size=[self.input_size, self.input_size],
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                
-                anomaly_map_list.append(a_map)
-                anomaly_prob_list.append(0.5 * torch.sum(output**2, dim=(1, 2, 3)) - log_jac_det)
-                
-            anomaly_map_list = torch.stack(anomaly_map_list, dim=-1)
-            anomaly_map = torch.mean(anomaly_map_list, dim=-1).flatten(1).sum(1)#.min(1)[0]
-            
-            ret["anomaly_map"] = torch.stack(anomaly_prob_list).mean(0)#anomaly_map"""
+        ret = {"loss": torch.stack(loss, dim=1).mean(1),
+               "mahalanobis": torch.stack(mahalanobis, dim=1).mean(1)}
 
         return ret

@@ -124,10 +124,10 @@ class Dataset:
     is_val=False,
     use_fourier=True, 
     test_name="forenSynth",
-    reals=None,
     attack_type='none',
     attack_params=None,
-    use_augs=True
+    use_augs=True,
+    debug=False
     ):
         """
         Factory class to create dataset instances based on the dataset name.
@@ -146,6 +146,7 @@ class Dataset:
         self.attack_type = attack_type
         self.attack_params = attack_params if attack_params is not None else {}
         self.use_augs = use_augs
+        self.debug = debug
         
     def create_dataset(self):
         if self.dataset_name == "FF++":            # TODO: sistemare patterns
@@ -196,6 +197,7 @@ class Dataset:
                 attack_type=self.attack_type,
                 attack_params=self.attack_params,
                 use_augs=self.use_augs,
+                debug=self.debug
             )
 
         else:
@@ -203,13 +205,18 @@ class Dataset:
 
 class DeepFakeDataset(Dataset):
     def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, is_val=False, reals_name='ffhq',
-                 use_fourier=False, attack_type='none', attack_params=None, seed=124, use_augs=True):
+                 use_fourier=False, attack_type='none', attack_params=None, seed=124, use_augs=True, debug=False):
         """
         Args:
             root_dir (str): Path to the root folder containing image data.
             input_size (tuple): Size for resizing images.
             is_train (bool): Flag to indicate if the dataset is for training or testing.
         """
+
+        self.debug = debug
+        self.is_train = is_train
+        self.is_val = is_val
+        self.use_fourier = use_fourier
 
         random.seed(seed)
         np.random.seed(seed)
@@ -227,10 +234,6 @@ class DeepFakeDataset(Dataset):
 
         # Filter files based on CSV split
         self.image_files = filter_files_by_csv_split(self.image_files, is_train, is_val)
-
-
-        self.is_train = is_train
-        self.use_fourier = use_fourier
         self.classes = np.unique([f.split("/")[-2] for f in self.image_files if (f.split("/")[-3] != "ffhq" and f.split("/")[-4] != "celeba_hq")])
         self.class_to_idx = {cls: idx + 1 for idx, cls in enumerate(self.classes)}
         ood_reals = 'celeba_hq' if reals_name == 'ffhq' else 'ffhq'
@@ -267,6 +270,14 @@ class DeepFakeDataset(Dataset):
 
         self.image_files = np.array(self.image_files)[idx]
         self.labels = np.array(self.labels)[idx]
+
+        if self.debug and self.is_train:
+            if not self.is_val:
+                print("-"*40)
+                print("-- DEBUG MODE: Using only 100 samples for training ---")
+                print("-"*40)
+            self.image_files = self.image_files[:100]
+            self.labels = self.labels[:100]
         
     def __getitem__(self, index):
         image_file = self.image_files[index]
