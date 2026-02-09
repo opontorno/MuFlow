@@ -1,6 +1,7 @@
 import argparse
 from pprint import pprint
 import os, pdb
+import time
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import yaml
@@ -28,10 +29,9 @@ def parse_args():
 
     parser.add_argument("--data", type=str, default='WILD', help="path to mvtec folder", choices=['FF++', 'WILD', 'progan'])
     parser.add_argument("--reals", type=str, default='ffhq', help="reals dataset", choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'])
-    parser.add_argument("--test", type=str, help="test name")
     parser.add_argument("--checkpoint", type=str, help="path to load checkpoint")
 
-    parser.add_argument('--wandb', default= 'disabled', choices=['online', 'offline', 'disabled'])
+    parser.add_argument('--wandb', default= 'online', choices=['online', 'offline', 'disabled'])
     parser.add_argument('--use_augs', type=int, default=0, choices=[0, 1], help="Whether to use data augmentation")
     parser.add_argument('--use_fourier', type=int, default=0, choices=[0, 1], help="Whether to use Fourier transform")
     parser.add_argument('--run_name', type=str)
@@ -61,7 +61,16 @@ def parse_args():
     parser.add_argument('--use_percentile', type=int, default=0, choices=[0, 1], help="Whether to use percentile")
     parser.add_argument('--percentile', type=int, default=95)
 
-    parser.add_argument('--early_stopping_patience', type=float, default=float("inf"), help="Patience epochs for early stopping based on Val Acc")
+    # Adversarial Training Hyperparameters
+    parser.add_argument('--use_adversarial', type=int, default=0, choices=[0, 1], help="Whether to use adversarial training")
+    parser.add_argument('--adv_strategy', type=str, default='same_batch', choices=['same_batch', 'alternate_batch', 'cycle_2_1'], help="Strategy for adversarial training")
+    parser.add_argument('--adv_lambda', type=float, default=-0.5, help="Weight for adversarial loss (negative to maximize)")
+    parser.add_argument('--noise_std', type=float, default=0.1, help="Standard deviation of Gaussian noise")
+    parser.add_argument('--noise_schedule', type=str, default='fixed', choices=['fixed', 'linear', 'exponential'], help="Noise schedule during training")
+    parser.add_argument('--noise_std_max', type=float, default=1.0, help="Maximum std if using noise schedule")
+    parser.add_argument('--noise_differentiable', type=int, default=0, choices=[0, 1], help="Whether noise should be differentiable")
+
+    parser.add_argument('-patience', '--early_stopping_patience', type=float, default=float("inf"), help="Patience epochs for early stopping based on Val Acc")
 
     args = parser.parse_args()
     
@@ -87,7 +96,6 @@ def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last
     dataset_instance = dataset.Dataset(
         dataset_name=args.data,
         reals_name=args.reals,
-        test_name=args.test,
         input_size=config["input_size"],
         is_train=is_train,
         is_val=is_val,
@@ -139,6 +147,12 @@ def build_model(config, model_type, args):
     gmm_values = np.load(gmm_parameters, allow_pickle=True).item() 
     print(f"Loading gmm parameters from {gmm_parameters}")
 
+    # Prepare adversarial training config
+    adversarial_config = {
+        'use_adversarial': args.use_adversarial == 1,
+        'noise_differentiable': args.noise_differentiable == 1,
+    } if hasattr(args, 'use_adversarial') else {'use_adversarial': False, 'noise_differentiable': False}
+
     if model_type == "FastFlow":
         model = fastflow.FastFlow(
             backbone_name=config["backbone_name"],
@@ -147,12 +161,14 @@ def build_model(config, model_type, args):
             conv3x3_only=config["conv3x3_only"],
             hidden_ratio=config["hidden_ratio"],
             gmm_values=gmm_values,
-            in_channels=3,
+            in_channels=1 if args.use_fourier == 1 else 3,
             backbone_weights=args.backbone_weights,
             out_indices=config.get("out_indices", [1, 2, 3]),
             use_proj=True if args.use_proj == 1 else False,
             projection_type=getattr(args, 'projection_type', 'conv'),
-            pooling_type=pooling_type
+            pooling_type=pooling_type,
+            use_adversarial=adversarial_config['use_adversarial'],
+            noise_differentiable=adversarial_config['noise_differentiable'],
         )
         print(
             "Model A.D. Param#: {}".format(
@@ -178,26 +194,94 @@ def build_optimizer(args, model, model_type, config):
         raise ValueError(f"Unknown model type: {model_type}")
 
 
+def get_noise_std(epoch, args):
+    """Calculate noise std based on schedule"""
+    if args.noise_schedule == 'fixed':
+        return args.noise_std
+    elif args.noise_schedule == 'linear':
+        # Linear increase from noise_std to noise_std_max
+        progress = min(epoch / args.num_epochs, 1.0)
+        return args.noise_std + (args.noise_std_max - args.noise_std) * progress
+    elif args.noise_schedule == 'exponential':
+        # Exponential increase
+        progress = min(epoch / args.num_epochs, 1.0)
+        return args.noise_std * (args.noise_std_max / args.noise_std) ** progress
+    return args.noise_std
+
+
+def should_use_noise_batch(step, strategy):
+    """Determine if current batch should use noise based on strategy"""
+    if strategy == 'same_batch':
+        # Always use both pure and noisy (handled in forward)
+        return True
+    elif strategy == 'alternate_batch':
+        # Alternate every batch: 0=pure, 1=noisy, 2=pure, 3=noisy...
+        return step % 2 == 1
+    elif strategy == 'cycle_2_1':
+        # Pattern: 2 pure, 1 noisy, 2 pure, 1 noisy...
+        # step % 3: 0=pure, 1=pure, 2=noisy
+        return step % 3 == 2
+    return False
+
+
 def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
+    start_time = time.time()
     model.train()
     loss_meter = utils.AverageMeter()
     loss_values = []
+    
+    use_adversarial = args.use_adversarial == 1 if hasattr(args, 'use_adversarial') else False
+    current_noise_std = get_noise_std(epoch, args) if use_adversarial else 0.0
+    
     for step, data in enumerate(dataloader):
+        # Forward pass
         data = data.cuda()
-        ret = model(data)
-        loss = ret["loss"].mean()
+        
+        if use_adversarial:
+            # Determine strategy
+            if args.adv_strategy == 'same_batch':
+                # Process both pure and noisy features in same forward pass
+                ret = model(data, noise_std=current_noise_std, adversarial_mode='same_batch')
+                loss_pure = ret["loss_pure"].mean()
+                loss_adv = ret["loss_adv"].mean()
+                loss = loss_pure + args.adv_lambda * loss_adv
+            else:
+                # Alternate or cycle strategy
+                use_noise = should_use_noise_batch(step, args.adv_strategy)
+                if use_noise:
+                    ret = model(data, noise_std=current_noise_std, adversarial_mode='noisy_only')
+                    loss_adv = ret["loss"].mean()
+                    loss = args.adv_lambda * loss_adv  # Maximize by negative weight
+                else:
+                    ret = model(data, noise_std=0.0, adversarial_mode='pure_only')
+                    loss_pure = ret["loss"].mean()
+                    loss = loss_pure
+        else:
+            # Standard training without adversarial
+            ret = model(data)
+            loss = ret["loss"].mean()
+        
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        loss_meter.update(loss.item())
         
-        loss_values.append(ret["loss"].detach().cpu())
+        loss_meter.update(loss.item())
+        loss_values.append((ret["loss"] if not use_adversarial or args.adv_strategy != 'same_batch' else ret.get("loss_pure", ret["loss"])).detach().cpu())
+        
         if (step + 1) % args.log_interval == 0 or (step + 1) == len(dataloader):
-            print(
-                "Epoch {} - Step {}: loss = {:.3f}({:.3f})".format(
-                    epoch + 1, step + 1, loss_meter.val, loss_meter.avg
+            if use_adversarial and args.adv_strategy == 'same_batch':
+                print(
+                    "Epoch {} - Iteration {}/{} - Loss: {:.3f} (Pure: {:.3f}, Adv: {:.3f}, NoiseStd: {:.4f})".format(
+                        epoch + 1, step + 1, len(dataloader), loss_meter.avg, loss_pure.item(), loss_adv.item(), current_noise_std
+                    )
                 )
-            )
+            else:
+                mode_str = "[NOISY]" if (use_adversarial and should_use_noise_batch(step, args.adv_strategy)) else "[PURE]"
+                print(
+                    "Epoch {} - Iteration {}/{} {} - Loss: {:.3f}".format(
+                        epoch + 1, step + 1, len(dataloader), mode_str if use_adversarial else "", loss_meter.avg
+                    )
+                )
             
             wandb.log({"Train Loss": loss_meter.val}, step=epoch + 1)
 
@@ -207,6 +291,18 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
     preds_train = torch.cat(loss_values, dim=0).numpy().reshape(-1, 1)
     train_mean = preds_train.mean()
     train_std = preds_train.std()
+    
+    # Log additional metrics
+    wandb_dict = {
+        "Train loss mean": train_mean,
+        "Train loss std": train_std,
+    }
+    if use_adversarial:
+        wandb_dict["Noise std"] = current_noise_std
+    wandb.log(wandb_dict, step=epoch + 1)
+    
+    training_time = time.time() - start_time
+    print(f"⏱️  Training epoch time: {training_time:.2f}s")
     
     return train_mean, train_std, preds_train
 
@@ -330,6 +426,7 @@ def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx, y_t
 
 
 def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, threshold_info=None): 
+    inference_start_time = time.time()
     model.eval()
     labels_list = []
     preds_list = []
@@ -345,7 +442,9 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
         preds_list.append(outputs)
         labels_list.append(targets.cpu())
 
-    print("Testing done")
+    inference_time = time.time() - inference_start_time
+    print(f"Testing done")
+    print(f"⏱️  Test inference time: {inference_time:.2f}s")
     
     # Concatenate tensors directly for better memory efficiency
     preds_ = torch.cat(preds_list, dim=0).numpy()
@@ -441,6 +540,7 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
     
     print("\n"+"Computing metrics using Real as baseline...")
     print("="*30)
+    metrics_real_start_time = time.time()
     # Compute metrics in parallel using all available CPU cores
     results = Parallel(n_jobs=-1, backend='threading')(
         delayed(_compute_class_metrics)(
@@ -471,10 +571,12 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
     mean_ap = np.mean(aps)
     mean_roc = np.mean(rocs)
     
+    metrics_real_time = time.time() - metrics_real_start_time
     print("-" * 30)
     print(f"Average Accuracy (vs Real): {mean_acc:.4f}")
     print(f"Average Precision (vs Real): {mean_ap:.4f}")
     print(f"Average ROC AUC (vs Real): {mean_roc:.4f}")
+    print(f"⏱️  Metrics computation time (Real baseline): {metrics_real_time:.2f}s")
     print("="*30 + "\n")
 
     # ============ Compute metrics using OOD Real as baseline ============
@@ -483,6 +585,7 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
     if 99 in class_masks and len(preds_99) > 0:
         print("Computing metrics using OOD Real as baseline...")
         print("="*30)
+        metrics_ood_start_time = time.time()
         
         # Compute metrics in parallel using OOD Real as baseline
         results_ood = Parallel(n_jobs=-1, backend='threading')(
@@ -511,10 +614,12 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
         mean_ap_ood = np.mean(aps_ood) if len(aps_ood) > 0 else 0
         mean_roc_ood = np.mean(rocs_ood) if len(rocs_ood) > 0 else 0
         
+        metrics_ood_time = time.time() - metrics_ood_start_time
         print("-" * 30)
         print(f"Average Accuracy (vs OOD Real): {mean_acc_ood:.4f}")
         print(f"Average Precision (vs OOD Real): {mean_ap_ood:.4f}")
         print(f"Average ROC AUC (vs OOD Real): {mean_roc_ood:.4f}")
+        print(f"⏱️  Metrics computation time (OOD Real baseline): {metrics_ood_time:.2f}s")
         print("="*30 + "\n")
         
         # Add to wandb metrics
@@ -555,7 +660,7 @@ def train(args, config):
         project="MuFlow", 
         config=config, 
         name=args.run_name, 
-        mode=args.wandb)
+        mode="disabled" if args.debug else args.wandb)
     wandb.config.update(args)
 
     model = build_model(config, args.model_type, args)
@@ -691,6 +796,9 @@ if __name__ == "__main__":
 
         if args.use_augs == 1:
             args.run_name += "_augs"
+
+        if args.use_adversarial == 1:
+            args.run_name += f"_adv-{args.adv_strategy}_lambda{args.adv_lambda}_noise{args.noise_std}_{args.noise_schedule}"
 
     const.CHECKPOINT_DIR += "/" + args.run_name 
 

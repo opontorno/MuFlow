@@ -15,7 +15,6 @@ import pandas as pd
 import pdb
 from tqdm import tqdm
 
-# Add parent directory to path to import fourier_utils
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fourier_utils import FourierMagnitudeTransform, ToTensorNoScale
 
@@ -170,16 +169,10 @@ class Dataset:
                 root_dir = [f"{c.DATA_DIR}/ffhq/*"] if self.is_train \
                             else [f"{c.DATA_DIR}/ffhq/*"] + [f"{c.DATA_DIR}/WILD/**/**"] + [f"{c.DATA_DIR}/datasets_DFX/**"] + [f"{c.DATA_DIR}/celeba_hq/val/**/*"]
                 file_pattern = "*.*g" 
-            #########################################################adjust celeba in val#############################
             elif self.reals_name == 'celeba_hq':
                 root_dir = [f"{c.DATA_DIR}/celeba_hq/train/*"] if self.is_train \
-                            else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/WILD/*"] + [f"{c.DATA_DIR}/datasets_DFX/**"]
+                            else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/WILD/*"] + [f"{c.DATA_DIR}/datasets_DFX/"] + [f"{c.DATA_DIR}/ffhq/"]
                 file_pattern = "**/*.*g" 
-            elif self.reals_name == 'ffhq+celeba_hq':
-                root_dir = [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*"] if self.is_train \
-                            else [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*", f"{c.DATA_DIR}/WILD/*"] + [f"{c.DATA_DIR}/datasets_DFX/**"]
-                file_pattern = "**/*" 
-            ###################################################################################################
 
             if not self.is_train:
                 print(f'Attack type: {self.attack_type}')
@@ -202,6 +195,7 @@ class Dataset:
 
         else:
             raise ValueError(f"Unsupported dataset: {self.dataset_name}")
+
 
 class DeepFakeDataset(Dataset):
     def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, is_val=False, reals_name='ffhq',
@@ -278,177 +272,6 @@ class DeepFakeDataset(Dataset):
                 print("-"*40)
             self.image_files = self.image_files[:100]
             self.labels = self.labels[:100]
-        
-    def __getitem__(self, index):
-        image_file = self.image_files[index]
-        label = self.labels[index]
-
-        # Load image as RGB (Fourier transform applied in pipeline if use_fourier=True)
-        image = Image.open(image_file).convert("RGB")
-        
-        # Apply robustness attacks only in test mode and if not using Fourier
-        if not self.is_train and not self.use_fourier:
-            image = self.attack.apply(image)
-        
-        # Apply transforms (includes Fourier if use_fourier=True)
-        image = self.image_transform(image).float()
-        
-        if self.is_train:
-            return image
-        else:
-            return image, label
-
-    def __len__(self):
-        return len(self.image_files)
-
-
-class Dataset_celeba:
-    def __init__(self, 
-    dataset_name, 
-    reals_name,
-    input_size=(224,224), 
-    is_train=True,  
-    use_fourier=True, 
-    test_name="forenSynth",
-    reals=None,
-    attack_type='none',
-    attack_params=None
-    ):
-        """
-        Factory class to create dataset instances based on the dataset name.
-
-        Args:
-            dataset_name (str): Name of the dataset to create.
-            is_train (bool): Flag indicating if the dataset is for training or testing.
-        """
-        self.dataset_name = dataset_name
-        self.reals_name = reals_name
-        self.test_name = test_name  
-        self.is_train = is_train
-        self.input_size = input_size
-        self.use_fourier = use_fourier
-        self.attack_type = attack_type
-        self.attack_params = attack_params if attack_params is not None else {}
-
-    def create_dataset(self):
-        if self.dataset_name == "FF++":            # TODO: sistemare patterns
-            root_dir = f"{c.DATA_DIR}/dataset/train/FF++/real" if self.is_train else f"{c.DATA_DIR}/dataset/train/FF++/"
-            file_pattern = "**/c23/frames_spectrum_256/**/magnitude*.npy" if self.use_fourier else "**/c23/frames/**/*.png"
-
-            return DeepFakeDataset(
-                root_dir=root_dir,
-                file_pattern=file_pattern,
-                input_size=self.input_size,
-                use_valid=True,
-                is_train=self.is_train,
-                use_fourier=self.use_fourier,
-                attack_type=self.attack_type,
-                attack_params=self.attack_params
-            )
-
-        elif self.dataset_name == 'WILD':
-            if self.reals_name == 'ffhq':
-                test_folders = ['014000', '022000']
-                root_dir = [f"{c.DATA_DIR}/ffhq/{fol}" for fol in os.listdir(f"{c.DATA_DIR}/ffhq") if fol not in test_folders] if self.is_train \
-                            else [f"{c.DATA_DIR}/celeba_hq/val/*/**"] + [f"{c.DATA_DIR}/WILD/**/**"] + [f"{c.DATA_DIR}/ffhq/{fol}" for fol in test_folders] 
-                file_pattern = "*.*g"
-            elif self.reals_name == 'celeba_hq':
-                root_dir = [f"{c.DATA_DIR}/celeba_hq/train/*"] if self.is_train else [f"{c.DATA_DIR}/celeba_hq/val/*", f"{c.DATA_DIR}/WILD/*"]
-                file_pattern = "**/*.*g" 
-            #########################################################check effectivness#############################
-            elif self.reals_name == 'ffhq+celeba_hq':
-                root_dir = [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*"] if self.is_train else [f"{c.DATA_DIR}/ffhq", f"{c.DATA_DIR}/celeba_hq/*", f"{c.DATA_DIR}/WILD/*"]
-                file_pattern = "**/*" 
-            ###################################################################################################
-
-            if not self.is_train:
-                print(f'Attack type: {self.attack_type}')
-                if self.attack_type != 'none':
-                    print(f'Attack params: {self.attack_params}')
-            
-            return DeepFakeDataset_w_celeba(
-                root_dir=root_dir,
-                file_pattern=file_pattern,
-                input_size=self.input_size,
-                use_valid=True,
-                is_train=self.is_train,
-                use_fourier=self.use_fourier,
-                attack_type=self.attack_type,
-                attack_params=self.attack_params
-            )
-
-        else:
-            raise ValueError(f"Unsupported dataset: {self.dataset_name}")
-
-class DeepFakeDataset_w_celeba(Dataset):
-    def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, 
-                 use_valid=False, use_fourier=False, attack_type='none', attack_params=None, seed=124, use_augs=True):
-        """
-        Args:
-            root_dir (str): Path to the root folder containing image data.
-            input_size (tuple): Size for resizing images.
-            is_train (bool): Flag to indicate if the dataset is for training or testing.
-        """
-
-        random.seed(seed)
-        np.random.seed(seed)
-
-        self.attack = RobustnessAttacks(
-            attack_type=attack_type if not is_train else 'none',  # Attacchi solo in test
-            **(attack_params if attack_params is not None else {})
-        )
-        
-        self.image_transform = create_image_transform(input_size, use_fourier, is_train, use_augs)
-
-        # Collect all image paths recursively
-        file_pattern = file_pattern 
-        self.image_files = [np.unique(np.array(glob(os.path.join(r, file_pattern), recursive=True))) for r in root_dir]
-        self.image_files = np.concatenate(self.image_files)
-
-        self.is_train = is_train
-        self.use_fourier = use_fourier
-        self.classes = np.unique([f.split("/")[-2] for f in self.image_files if (f.split("/")[-3] != "ffhq" and f.split("/")[-4] != "celeba_hq")]+["celeba_hq"])
-        self.class_to_idx = {cls: idx + 1 for idx, cls in enumerate(self.classes)}
-        
-        # self.labels = [0 if ("ffhq" in image_file or "celeba_hq" in image_file) else self.class_to_idx[image_file.split("/")[-2]] for image_file in self.image_files]
-
-        self.labels = []
-        for image_file in self.image_files:
-            if "ffhq" in image_file:
-                self.labels.append(0)
-            elif "celeba_hq" in image_file:
-                self.labels.append(0)
-                # self.labels.append(self.class_to_idx["celeba_hq"])
-            else:
-                class_name = image_file.split("/")[-2]
-                self.labels.append(self.class_to_idx[class_name])
-
-
-        #Balancing test set
-        # if not self.is_train:      
-        #     min_count = min(Counter(self.labels).values())
-        #     self.image_files, self.labels = zip(*[item for label in set(self.labels) for item in choices([(img, lbl) for img, lbl in zip(self.image_files, self.labels) if lbl == label], k=(min_count if label == 0 else min_count//len(self.classes)))])
-        if not self.is_train:      
-            min_count = min(sum(1 for label in self.labels if label != 0), self.labels.count(0))
-            balanced_items = []
-            for label in sorted(set(self.labels)):  # Sort labels for consistency
-                label_items = [(img, lbl) for img, lbl in zip(self.image_files, self.labels) if lbl == label]
-                k = min_count if label == 0 else min_count // len(self.classes)
-                # Re-seed before choices to ensure reproducibility
-                random.seed(seed + label)  # Different seed per label
-                balanced_items.extend(random.choices(label_items, k=k))
-            
-            self.image_files, self.labels = zip(*balanced_items)
-            self.image_files = np.array(self.image_files)
-            self.labels = np.array(self.labels)
-        
-
-        # idx = np.random.permutation(len(self.image_files))
-        rng = np.random.RandomState(seed)
-        idx = rng.permutation(len(self.image_files))
-
-        self.image_files = np.array(self.image_files)[idx]
-        self.labels = np.array(self.labels)[idx]
         
     def __getitem__(self, index):
         image_file = self.image_files[index]

@@ -67,6 +67,8 @@ class FastFlow(nn.Module):
         use_proj=False,
         projection_type='conv',
         pooling_type='mean',
+        use_adversarial=False,
+        noise_differentiable=False,
     ):
         super(FastFlow, self).__init__()
         assert (
@@ -135,6 +137,10 @@ class FastFlow(nn.Module):
             )
         self.input_size = input_size
         self.pooling_type = pooling_type
+        
+        # Adversarial training config
+        self.use_adversarial = use_adversarial
+        self.noise_differentiable = noise_differentiable
 
         gmm_values = gmm_values["real"]
         self.means = []
@@ -145,8 +151,93 @@ class FastFlow(nn.Module):
             self.means.append(gmm_values[i][0] + translation_param) 
             self.covs.append(gmm_values[i][1])
         #self.covs = [np.expand_dims(np.eye(cov.shape[1]),axis=0) for cov in self.covs]
+    
+    def add_gaussian_noise(self, features, noise_std):
+        """
+        Add Gaussian noise to features.
+        
+        Args:
+            features: List of feature tensors from backbone
+            noise_std: Standard deviation of Gaussian noise
+        
+        Returns:
+            List of noisy feature tensors
+        """
+        noisy_features = []
+        for feature in features:
+            noise = torch.randn_like(feature) * noise_std
+            if not self.noise_differentiable:
+                noise = noise.detach()
+            noisy_feature = feature + noise
+            noisy_features.append(noisy_feature)
+        return noisy_features
+    
+    def process_features(self, features):
+        """
+        Process features through projection (if enabled) and normalizing flows.
+        
+        Args:
+            features: List of feature tensors
+        
+        Returns:
+            Dictionary with 'loss' and 'mahalanobis' keys
+        """
+        # Apply projection layer if enabled
+        if self.use_proj:
+            projected_features = []
+            for i, feature in enumerate(features):
+                feature_projected = self.projection_layers[i](feature)
+                projected_features.append(feature_projected)
+            features = projected_features
+        
+        loss = []
+        mahalanobis = []
+        for i, feature in enumerate(features):
+            output, log_jac_det = self.nf_flows[i](feature)
+            mu = self.means[i]
+            cov = self.covs[i]
+            
+            mu = torch.tensor(mu, device=output.device)
+            cov = torch.tensor(cov, device=output.device)
 
-    def forward(self, x):
+            if self.pooling_type == 'mean':
+                output = output.mean((2,3))
+            elif self.pooling_type == 'max':
+                output = output.flatten(2).max(-1)[0]
+            elif self.pooling_type == 'mean_std':
+                mean_output = output.mean((2,3))
+                std_output = output.std((2,3))
+                output = torch.cat([mean_output, std_output], dim=1)
+            elif self.pooling_type == 'flatten':
+                output = output.mean(-1).flatten(1)
+            else:
+                output = output.flatten(1)
+
+            loss_, maha_ = gaussian_nll_loss(output=output, mu=mu, cov=cov, log_jac_det=log_jac_det)
+            loss.append(loss_)
+            mahalanobis.append(maha_)
+        
+        return {
+            "loss": torch.stack(loss, dim=1).mean(1),
+            "mahalanobis": torch.stack(mahalanobis, dim=1).mean(1)
+        }
+
+    def forward(self, x, noise_std=0.0, adversarial_mode='pure_only'):
+        """
+        Forward pass with optional adversarial training.
+        
+        Args:
+            x: Input tensor
+            noise_std: Standard deviation of Gaussian noise (default: 0.0)
+            adversarial_mode: Mode for adversarial training
+                - 'pure_only': Only process pure features (default)
+                - 'noisy_only': Only process noisy features
+                - 'same_batch': Process both pure and noisy features
+        
+        Returns:
+            Dictionary with loss and mahalanobis distance
+            If adversarial_mode='same_batch', returns loss_pure and loss_adv
+        """
         self.feature_extractor.eval()
         if isinstance(
             self.feature_extractor, timm.models.vision_transformer.VisionTransformer
@@ -187,50 +278,30 @@ class FastFlow(nn.Module):
         else:
             features = self.feature_extractor(x)
             features = [self.norms[i](feature) for i, feature in enumerate(features)]
-
-        # Apply projection layer (Conv2d) to each feature level if enabled
-        # 1x1 convolutions process each spatial location independently: (B, C, H, W) -> (B, C, H, W)
-        if self.use_proj:
-            projected_features = []
-            for i, feature in enumerate(features):
-                # Apply 1x1 convolutions directly - no reshape needed
-                feature_projected = self.projection_layers[i](feature)  # (B, C, H, W) -> (B, C, H, W)
-                projected_features.append(feature_projected)
-            features = projected_features
-
-        loss = []
-        mahalanobis = []
-        for i, feature in enumerate(features):
-            output, log_jac_det = self.nf_flows[i](features[i])
-            mu = self.means[i]
-            cov = self.covs[i]
-            
-            mu = torch.tensor(mu, device=output.device)
-            cov = torch.tensor(cov, device=output.device)
-
-            if self.pooling_type == 'mean':
-                # Spatial pooling: (B, C, H, W) -> (B, C)
-                output = output.mean((2,3))
-            elif self.pooling_type == 'max':
-                # Max pooling: (B, C, H, W) -> (B, C)
-                output = output.flatten(2).max(-1)[0]
-            elif self.pooling_type == 'mean_std':
-                # Mean + Std concatenation: (B, C, H, W) -> (B, 2*C)
-                mean_output = output.mean((2,3))
-                std_output = output.std((2,3))
-                output = torch.cat([mean_output, std_output], dim=1)
-            elif self.pooling_type == 'flatten':
-                # Mean on channels, then flatten spatial: (B, C, H, W) -> (B, C, W) -> (B, C*H)
-                output = output.mean(-1).flatten(1)
-            else:
-                # Full flatten: (B, C, H, W) -> (B, C*H*W)
-                output = output.flatten(1)
-
-            loss_, maha_ = gaussian_nll_loss(output=output, mu=mu, cov=cov, log_jac_det=log_jac_det)
-            loss.append(loss_)
-            mahalanobis.append(maha_)
         
-        ret = {"loss": torch.stack(loss, dim=1).mean(1),
-               "mahalanobis": torch.stack(mahalanobis, dim=1).mean(1)}
-
-        return ret
+        # Adversarial training logic
+        if adversarial_mode == 'same_batch':
+            # Process both pure and noisy features
+            noisy_features = self.add_gaussian_noise(features, noise_std)
+            
+            # Process pure features
+            ret_pure = self.process_features(features)
+            
+            # Process noisy features
+            ret_noisy = self.process_features(noisy_features)
+            
+            return {
+                "loss": ret_pure["loss"],  # For compatibility
+                "loss_pure": ret_pure["loss"],
+                "loss_adv": ret_noisy["loss"],
+                "mahalanobis": ret_pure["mahalanobis"],
+            }
+        
+        elif adversarial_mode == 'noisy_only':
+            # Only process noisy features
+            noisy_features = self.add_gaussian_noise(features, noise_std)
+            return self.process_features(noisy_features)
+        
+        else:  # 'pure_only' or standard forward
+            # Only process pure features
+            return self.process_features(features)
