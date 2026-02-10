@@ -64,7 +64,7 @@ def parse_args():
     # Adversarial Training Hyperparameters
     parser.add_argument('--use_adversarial', type=int, default=0, choices=[0, 1], help="Whether to use adversarial training")
     parser.add_argument('--adv_strategy', type=str, default='same_batch', choices=['same_batch', 'alternate_batch', 'cycle_2_1'], help="Strategy for adversarial training")
-    parser.add_argument('--adv_lambda', type=float, default=-0.5, help="Weight for adversarial loss (negative to maximize)")
+    parser.add_argument('--adv_lambda', type=float, default=-1, help="Weight for adversarial loss (negative to maximize)")
     parser.add_argument('--noise_std', type=float, default=0.1, help="Standard deviation of Gaussian noise")
     parser.add_argument('--noise_schedule', type=str, default='fixed', choices=['fixed', 'linear', 'exponential'], help="Noise schedule during training")
     parser.add_argument('--noise_std_max', type=float, default=1.0, help="Maximum std if using noise schedule")
@@ -144,6 +144,10 @@ def build_model(config, model_type, args):
     else:
         gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
     
+    # if not os.path.exists(gmm_parameters):
+    #     print(f"GMM parameters not found at {gmm_parameters}. Please run the parameter generation script first:")
+    #     !python generate_parameters.py --model_name {config['backbone_name']} --reals {args.reals} --use_fourier {args.use_fourier}
+
     gmm_values = np.load(gmm_parameters, allow_pickle=True).item() 
     print(f"Loading gmm parameters from {gmm_parameters}")
 
@@ -233,6 +237,11 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
     use_adversarial = args.use_adversarial == 1 if hasattr(args, 'use_adversarial') else False
     current_noise_std = get_noise_std(epoch, args) if use_adversarial else 0.0
     
+    # Separate meters for adversarial training
+    if use_adversarial:
+        loss_pure_meter = utils.AverageMeter()
+        loss_adv_meter = utils.AverageMeter()
+    
     for step, data in enumerate(dataloader):
         # Forward pass
         data = data.cuda()
@@ -245,17 +254,21 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
                 loss_pure = ret["loss_pure"].mean()
                 loss_adv = ret["loss_adv"].mean()
                 loss = loss_pure + args.adv_lambda * loss_adv
+                loss_pure_meter.update(loss_pure.item())
+                loss_adv_meter.update(loss_adv.item())
             else:
                 # Alternate or cycle strategy
                 use_noise = should_use_noise_batch(step, args.adv_strategy)
                 if use_noise:
                     ret = model(data, noise_std=current_noise_std, adversarial_mode='noisy_only')
                     loss_adv = ret["loss"].mean()
-                    loss = args.adv_lambda * loss_adv  # Maximize by negative weight
+                    loss = args.adv_lambda * loss_adv  # Use lambda weight
+                    loss_adv_meter.update(loss_adv.item())
                 else:
                     ret = model(data, noise_std=0.0, adversarial_mode='pure_only')
                     loss_pure = ret["loss"].mean()
                     loss = loss_pure
+                    loss_pure_meter.update(loss_pure.item())
         else:
             # Standard training without adversarial
             ret = model(data)
@@ -275,6 +288,11 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
                         epoch + 1, step + 1, len(dataloader), loss_meter.avg, loss_pure.item(), loss_adv.item(), current_noise_std
                     )
                 )
+                wandb.log({
+                    "Train Loss": loss_meter.val,
+                    "Train Loss Pure": loss_pure_meter.val,
+                    "Train Loss Adv": loss_adv_meter.val
+                }, step=epoch + 1)
             else:
                 mode_str = "[NOISY]" if (use_adversarial and should_use_noise_batch(step, args.adv_strategy)) else "[PURE]"
                 print(
@@ -282,8 +300,14 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
                         epoch + 1, step + 1, len(dataloader), mode_str if use_adversarial else "", loss_meter.avg
                     )
                 )
-            
-            wandb.log({"Train Loss": loss_meter.val}, step=epoch + 1)
+                log_dict = {"Train Loss": loss_meter.val}
+                if use_adversarial:
+                    use_noise = should_use_noise_batch(step, args.adv_strategy)
+                    if use_noise:
+                        log_dict["Train Loss Adv"] = loss_adv_meter.val
+                    else:
+                        log_dict["Train Loss Pure"] = loss_pure_meter.val
+                wandb.log(log_dict, step=epoch + 1)
 
     if scheduler:
       scheduler.step(loss_meter.val)
@@ -299,10 +323,12 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
     }
     if use_adversarial:
         wandb_dict["Noise std"] = current_noise_std
+        wandb_dict["Train Loss Pure Mean"] = loss_pure_meter.avg
+        wandb_dict["Train Loss Adv Mean"] = loss_adv_meter.avg
     wandb.log(wandb_dict, step=epoch + 1)
     
     training_time = time.time() - start_time
-    print(f"⏱️  Training epoch time: {training_time:.2f}s")
+    print(f"⏱️  Training epoch time: {training_time // 60:.2f}m {training_time % 60:.2f}s")
     
     return train_mean, train_std, preds_train
 
@@ -444,7 +470,7 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
 
     inference_time = time.time() - inference_start_time
     print(f"Testing done")
-    print(f"⏱️  Test inference time: {inference_time:.2f}s")
+    print(f"⏱️  Test inference time: {inference_time // 60:.0f}m {inference_time % 60:.2f}s")
     
     # Concatenate tensors directly for better memory efficiency
     preds_ = torch.cat(preds_list, dim=0).numpy()
@@ -576,7 +602,7 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
     print(f"Average Accuracy (vs Real): {mean_acc:.4f}")
     print(f"Average Precision (vs Real): {mean_ap:.4f}")
     print(f"Average ROC AUC (vs Real): {mean_roc:.4f}")
-    print(f"⏱️  Metrics computation time (Real baseline): {metrics_real_time:.2f}s")
+    print(f"⏱️  Metrics computation time (Real baseline): {metrics_real_time // 60:.0f}m {metrics_real_time % 60:.2f}s")
     print("="*30 + "\n")
 
     # ============ Compute metrics using OOD Real as baseline ============
@@ -619,7 +645,7 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
         print(f"Average Accuracy (vs OOD Real): {mean_acc_ood:.4f}")
         print(f"Average Precision (vs OOD Real): {mean_ap_ood:.4f}")
         print(f"Average ROC AUC (vs OOD Real): {mean_roc_ood:.4f}")
-        print(f"⏱️  Metrics computation time (OOD Real baseline): {metrics_ood_time:.2f}s")
+        print(f"⏱️  Metrics computation time (OOD Real baseline): {metrics_ood_time // 60:.0f}m {metrics_ood_time % 60:.2f}s")
         print("="*30 + "\n")
         
         # Add to wandb metrics

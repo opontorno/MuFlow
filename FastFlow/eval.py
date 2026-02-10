@@ -22,7 +22,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.metrics import accuracy_score, average_precision_score
 from sklearn.neighbors import LocalOutlierFactor
 
-GANS = ['StyleGAN', 'StyleGAN2', 'StyleGAN3']
+GANS = ['StyleGAN', 'StyleGAN2', 'StyleGAN3', 'STARGAN', 'AttGAN', 'GDWCT']
 DM_OPEN = ['Flux.1', 'Stable DIffusion 3.5', 'Stable Diffusion XL', 'Stable Cascade', 'Stable Diffusion Attend and Excite']
 DM_CLOSED = ['Dall-E 3', 'Midjourney', 'Starry AI', 'Deep AI', 'Hotpot AI', 'Nvidia Sana PAG', 'Tencent Hunyuan', 'Flux.1.1 Pro']
 

@@ -153,32 +153,13 @@ patterns_means = {}
 for gen in generators:
     patterns_means[gen] = os.path.join(common_path, gen, '*.png')
 
-flux_1_means = glob(patterns_means['Flux.1'])
-ffhq_means = glob(patterns_means['ffhq'])
-stable_diffusion_35_means = glob(patterns_means['Stable DIffusion 3.5'])
-starry_ai_means = glob(patterns_means['Starry AI'])
-stylegan3_means = glob(patterns_means['StyleGAN3'])
-stable_diffusion_xl_means = glob(patterns_means['Stable Diffusion XL'])
-attend_and_excite_means = glob(patterns_means['Stable Diffusion Attend and Excite'])
-midjourney_means = glob(patterns_means['Midjourney'])
-stable_cascade_means = glob(patterns_means['Stable Cascade'])
-flux_1_1_pro_means = glob(patterns_means['Flux.1.1 Pro'])
-deep_ai_means = glob(patterns_means['Deep AI'])
-stylegan2_means = glob(patterns_means['StyleGAN2'])
-celeba_hq_means = glob(patterns_means['celeba_hq'])
-hotpot_ai_means = glob(patterns_means['Hotpot AI'])
-tencent_hunyuan_means = glob(patterns_means['Tencent Hunyuan'])
-dalle_3_means = glob(patterns_means['Dall-E 3'])
-stylegan_means = glob(patterns_means['StyleGAN'])
-nvidia_sana_pag_means = glob(patterns_means['Nvidia Sana PAG'])
-
 # Select real samples based on reals parameter
 if reals == 'ffhq':
-    real_sample = ffhq_means
+    real_sample = glob(patterns_means['ffhq'])
 elif reals == 'celeba_hq':
-    real_sample = celeba_hq_means
+    real_sample = glob(patterns_means['celeba_hq'])
 else:
-    real_sample = ffhq_means + celeba_hq_means
+    real_sample = glob(patterns_means['ffhq']) + glob(patterns_means['celeba_hq'])
 
 print(f"Number of real samples: {len(real_sample)}")
 print(f"Extracting features (Fourier: {use_fourier})...")
