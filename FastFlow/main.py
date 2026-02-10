@@ -328,7 +328,7 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
     wandb.log(wandb_dict, step=epoch + 1)
     
     training_time = time.time() - start_time
-    print(f"⏱️  Training epoch time: {training_time // 60:.2f}m {training_time % 60:.2f}s")
+    print(f"⏱️  Training epoch time: {int(training_time // 60)}m {int(training_time % 60)}s")
     
     return train_mean, train_std, preds_train
 
@@ -470,7 +470,7 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
 
     inference_time = time.time() - inference_start_time
     print(f"Testing done")
-    print(f"⏱️  Test inference time: {inference_time // 60:.0f}m {inference_time % 60:.2f}s")
+    print(f"⏱️  Test inference time: {int(inference_time // 60)}m {int(inference_time % 60)}s")
     
     # Concatenate tensors directly for better memory efficiency
     preds_ = torch.cat(preds_list, dim=0).numpy()
@@ -602,7 +602,7 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
     print(f"Average Accuracy (vs Real): {mean_acc:.4f}")
     print(f"Average Precision (vs Real): {mean_ap:.4f}")
     print(f"Average ROC AUC (vs Real): {mean_roc:.4f}")
-    print(f"⏱️  Metrics computation time (Real baseline): {metrics_real_time // 60:.0f}m {metrics_real_time % 60:.2f}s")
+    print(f"⏱️  Metrics computation time (Real baseline): {int(metrics_real_time // 60)}m {int(metrics_real_time % 60)}s")
     print("="*30 + "\n")
 
     # ============ Compute metrics using OOD Real as baseline ============
@@ -645,7 +645,7 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
         print(f"Average Accuracy (vs OOD Real): {mean_acc_ood:.4f}")
         print(f"Average Precision (vs OOD Real): {mean_ap_ood:.4f}")
         print(f"Average ROC AUC (vs OOD Real): {mean_roc_ood:.4f}")
-        print(f"⏱️  Metrics computation time (OOD Real baseline): {metrics_ood_time // 60:.0f}m {metrics_ood_time % 60:.2f}s")
+        print(f"⏱️  Metrics computation time (OOD Real baseline): {int(metrics_ood_time // 60)}m {int(metrics_ood_time % 60)}s")
         print("="*30 + "\n")
         
         # Add to wandb metrics

@@ -19,7 +19,8 @@ def gaussian_nll_loss(output, mu, cov, log_jac_det):
     cov_inv = torch.linalg.inv(cov)
     diff = (output - mu).reshape(B, d, 1) # Shape: (B, d, 1)  TODO: controllare shape output
     mahalanobis = torch.matmul(diff.transpose(1, 2), torch.matmul(cov_inv, diff)).squeeze() # Mahalanobis distance: (x - mu)^T Σ^{-1} (x - mu)
-    loss = 0.5 * mahalanobis - log_jac_det
+
+    loss = torch.log1p(0.5 * mahalanobis - log_jac_det)
 
     return loss, mahalanobis
 
@@ -154,22 +155,26 @@ class FastFlow(nn.Module):
     
     def add_gaussian_noise(self, features, noise_std):
         """
-        Add Gaussian noise to features.
+        Add Gaussian noise to features, scaled relative to feature magnitude.
         
         Args:
             features: List of feature tensors from backbone
-            noise_std: Standard deviation of Gaussian noise
+            noise_std: Relative standard deviation multiplier (e.g., 0.1 = 10% of feature std)
         
         Returns:
             List of noisy feature tensors
         """
         noisy_features = []
         for feature in features:
-            noise = torch.randn_like(feature) * noise_std
+            feature_std = feature.std(dim=[0, 2, 3], keepdim=True) + 1e-8
+            noise = torch.randn_like(feature) * noise_std * feature_std
+            
             if not self.noise_differentiable:
                 noise = noise.detach()
+            
             noisy_feature = feature + noise
             noisy_features.append(noisy_feature)
+        
         return noisy_features
     
     def process_features(self, features):
