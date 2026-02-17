@@ -2,11 +2,14 @@ import argparse
 from pprint import pprint
 import os, pdb
 import time
+import timm
+import torch.nn.functional as F
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import yaml
 import wandb
 import joblib
+import GPUtil
 
 import constants as const
 import dataset
@@ -41,6 +44,7 @@ def parse_args():
     parser.add_argument('--log_interval', type=int, default=10)
     parser.add_argument('--num_workers', type=int, default=4, help="number of data loading workers")
     parser.add_argument('--debug', action='store_true', help="Debug mode with reduced dataset size")
+    parser.add_argument('--gpu_id', type=int, default=None, help="Manually specify GPU ID to use (default: auto-select GPU with most free memory)")
 
     # Training Hyperparameters
     parser.add_argument('--optimizer', type=str, default='AdamW', choices=['AdamW', 'sgd'])
@@ -54,12 +58,18 @@ def parse_args():
 
     # Model Hyperparameters
     parser.add_argument('--alpha', type=float, default=0.01, help="Target false positive rate under the normality assumption, i.e., the probability of flagging a normal sample as anomalous.")
-    parser.add_argument('--use_proj', type=int, default=0, choices=[0, 1], help="Whether to use projection layer")
-    parser.add_argument('--projection_type', type=str, default='conv', choices=['conv', 'mlp', 'autoencoder', 'identity'], help="Type of projection layer")
     parser.add_argument('--use_lof', type=int, default=0, choices=[0, 1], help="Whether to use LOF")
     parser.add_argument('--contamination', default='auto')
     parser.add_argument('--use_percentile', type=int, default=0, choices=[0, 1], help="Whether to use percentile")
     parser.add_argument('--percentile', type=int, default=95)
+    
+    # Projection Layer Hyperparameters
+    parser.add_argument('--use_proj_layer', type=int, default=0, choices=[0, 1], help="Whether to use projection layer with contrastive learning")
+    parser.add_argument('--proj_hidden_ratio', type=float, default=0.5, help="Hidden layer ratio for projection layer")
+    parser.add_argument('--lambda_contrastive', type=float, default=1.0, help="Weight for contrastive loss")
+    parser.add_argument('--lambda_reconstruction', type=float, default=1.0, help="Weight for reconstruction loss")
+    parser.add_argument('--proj_noise_std', type=float, default=0.1, help="Noise std for creating negative pairs in projection training")
+    parser.add_argument('--contrastive_margin', type=float, default=2.0, help="Margin for contrastive loss")
 
     # Adversarial Training Hyperparameters
     parser.add_argument('--use_adversarial', type=int, default=0, choices=[0, 1], help="Whether to use adversarial training")
@@ -75,6 +85,28 @@ def parse_args():
     args = parser.parse_args()
     
     return args
+
+
+def select_best_gpu():
+    """
+    Automatically select the GPU with the most free memory.
+    
+    Returns:
+        int: GPU ID with most free memory, or 0 if no GPU available
+    """
+    if not torch.cuda.is_available():
+        print("No CUDA GPUs available, using CPU")
+        return None
+    
+    gpus = GPUtil.getGPUs()
+    if not gpus:
+        print("No GPUs found by GPUtil, using cuda:0")
+        return 0
+    
+    best_gpu = max(gpus, key=lambda gpu: gpu.memoryFree)
+    print(f"🎯 Auto-selected GPU {best_gpu.id}: {best_gpu.name} (Free: {best_gpu.memoryFree}MB / {best_gpu.memoryTotal}MB)")
+    
+    return best_gpu.id
 
 
 def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last, return_class2idx=False):
@@ -133,6 +165,41 @@ def build_test_data_loader(args, config):
     return _build_data_loader_common(args, config, is_train=False, is_val=False, shuffle=False, drop_last=False, return_class2idx=True)
 
 
+def build_pair_data_loader(args, config):
+    """
+    Build dataloader for projection layer training with PairDataset.
+    Returns pairs of real images for contrastive learning.
+    """
+    from dataset import PairDataset
+    
+    # Create PairDataset instance
+    pair_dataset = PairDataset(
+        root_dir=[f"{dataset.DATA_DIR}/ffhq/*"] if args.reals == 'ffhq' else [f"{dataset.DATA_DIR}/celeba_hq/train/*"],
+        file_pattern="*.*g",
+        input_size=config["input_size"],
+        is_train=True,
+        is_val=False,
+        reals_name=args.reals,
+        use_fourier=True if args.use_fourier == 1 else False,
+        use_augs=True if args.use_augs == 1 else False,
+        debug=args.debug
+    )
+    
+    num_workers = getattr(args, 'num_workers', 4)
+    dataloader = torch.utils.data.DataLoader(
+        pair_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        drop_last=True,
+        pin_memory=True,
+        persistent_workers=True if num_workers > 0 else False,
+        prefetch_factor=2 if num_workers > 0 else None,
+    )
+    
+    return dataloader
+
+
 def build_model(config, model_type, args):
     out_indices = config.get("out_indices", [1, 2, 3])
     out_indices_str = str(out_indices)
@@ -168,11 +235,11 @@ def build_model(config, model_type, args):
             in_channels=1 if args.use_fourier == 1 else 3,
             backbone_weights=args.backbone_weights,
             out_indices=config.get("out_indices", [1, 2, 3]),
-            use_proj=True if args.use_proj == 1 else False,
-            projection_type=getattr(args, 'projection_type', 'conv'),
             pooling_type=pooling_type,
             use_adversarial=adversarial_config['use_adversarial'],
             noise_differentiable=adversarial_config['noise_differentiable'],
+            use_proj_layer=args.use_proj_layer == 1 if hasattr(args, 'use_proj_layer') else False,
+            proj_hidden_ratio=args.proj_hidden_ratio if hasattr(args, 'proj_hidden_ratio') else 0.5,
         )
         print(
             "Model A.D. Param#: {}".format(
@@ -185,15 +252,59 @@ def build_model(config, model_type, args):
 
 
 def build_optimizer(args, model, model_type, config):
+    """
+    Build optimizer(s) for the model.
+    
+    Returns:
+        If use_proj_layer=0: single optimizer for all parameters
+        If use_proj_layer=1: tuple (optimizer_proj, optimizer_fastflow)
+    """
     if model_type == "FastFlow":
-        if args.optimizer == "AdamW":
-            return torch.optim.AdamW(
-                model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-            )
-        if args.optimizer == "sgd":
-            return torch.optim.SGD(
-                model.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=0.9
-            )
+        use_proj = hasattr(args, 'use_proj_layer') and args.use_proj_layer == 1
+        
+        if use_proj and model.projection_layers is not None:
+            # Create two separate optimizers for end-to-end training
+            if args.optimizer == "AdamW":
+                optimizer_proj = torch.optim.AdamW(
+                    model.projection_layers.parameters(), 
+                    lr=args.lr, 
+                    weight_decay=args.weight_decay
+                )
+                optimizer_fastflow = torch.optim.AdamW(
+                    model.nf_flows.parameters(), 
+                    lr=args.lr, 
+                    weight_decay=args.weight_decay
+                )
+            elif args.optimizer == "sgd":
+                optimizer_proj = torch.optim.SGD(
+                    model.projection_layers.parameters(), 
+                    lr=args.lr, 
+                    weight_decay=args.weight_decay, 
+                    momentum=0.9
+                )
+                optimizer_fastflow = torch.optim.SGD(
+                    model.nf_flows.parameters(), 
+                    lr=args.lr, 
+                    weight_decay=args.weight_decay, 
+                    momentum=0.9
+                )
+            else:
+                raise ValueError(f"Unknown optimizer: {args.optimizer}")
+            
+            return optimizer_proj, optimizer_fastflow
+        
+        else:
+            # Single optimizer for standard training
+            if args.optimizer == "AdamW":
+                return torch.optim.AdamW(
+                    model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+                )
+            elif args.optimizer == "sgd":
+                return torch.optim.SGD(
+                    model.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=0.9
+                )
+            else:
+                raise ValueError(f"Unknown optimizer: {args.optimizer}")
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -228,6 +339,143 @@ def should_use_noise_batch(step, strategy):
     return False
 
 
+def train_projection_one_epoch(dataloader_pair, model, optimizer_proj, epoch, args):
+    """
+    Train projection layer for one epoch using contrastive and reconstruction loss.
+    
+    Args:
+        dataloader_pair: DataLoader with PairDataset (returns image pairs)
+        model: FastFlow model with projection layers
+        optimizer_proj: Optimizer for projection layers
+        epoch: Current epoch number
+        args: Arguments with hyperparameters
+    
+    Returns:
+        Tuple of (avg_contrastive_loss, avg_reconstruction_loss, avg_total_loss)
+    """
+    from proj_layer import contrastive_loss
+    
+    start_time = time.time()
+    
+    # Set training mode: projection trainable, FastFlow frozen
+    if model.projection_layers is not None:
+        for proj in model.projection_layers:
+            proj.train()
+    model.nf_flows.eval()
+    model.feature_extractor.eval()
+    
+    loss_contrastive_meter = utils.AverageMeter()
+    loss_recon_meter = utils.AverageMeter()
+    loss_total_meter = utils.AverageMeter()
+    
+    lambda_c = args.lambda_contrastive if hasattr(args, 'lambda_contrastive') else 1.0
+    lambda_r = args.lambda_reconstruction if hasattr(args, 'lambda_reconstruction') else 0.5
+    proj_noise_std = args.proj_noise_std if hasattr(args, 'proj_noise_std') else 0.1
+    margin = args.contrastive_margin if hasattr(args, 'contrastive_margin') else 1.0
+    device = args.device if hasattr(args, 'device') else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    for step, (img1, img2) in enumerate(dataloader_pair):
+        img1, img2 = img1.to(device), img2.to(device)
+        
+        # Extract features (frozen feature extractor)
+        with torch.no_grad():
+            # For transformers and other special backbones
+            if isinstance(model.feature_extractor, timm.models.vision_transformer.VisionTransformer):
+                features1 = model.feature_extractor(img1)
+                features2 = model.feature_extractor(img2)
+                # Process transformer features...
+                features1 = [features1]
+                features2 = [features2]
+            elif isinstance(model.feature_extractor, timm.models.cait.Cait):
+                features1 = model.feature_extractor(img1)
+                features2 = model.feature_extractor(img2)
+                features1 = [features1]
+                features2 = [features2]
+            else:
+                features1 = model.feature_extractor(img1)
+                features1 = [model.norms[i](feat) for i, feat in enumerate(features1)]
+                features2 = model.feature_extractor(img2)
+                features2 = [model.norms[i](feat) for i, feat in enumerate(features2)]
+            
+            # Add noise to features1 for negative pairs
+            noisy_features1 = model.add_gaussian_noise(features1, proj_noise_std)
+        
+        # Project features
+        proj_clean1 = [model.projection_layers[i](features1[i]) for i in range(len(features1))]
+        proj_clean2 = [model.projection_layers[i](features2[i]) for i in range(len(features2))]
+        proj_noisy1 = [model.projection_layers[i](noisy_features1[i]) for i in range(len(noisy_features1))]
+        
+        # Compute losses for each scale and average
+        loss_contrastive_total = 0
+        loss_recon_total = 0
+        
+        for i in range(len(proj_clean1)):
+            # Contrastive loss with positive and negative pairs
+            # Positive pairs: (proj_clean1, proj_clean2) - both clean, different images -> label=1
+            # Negative pairs: (proj_clean1, proj_noisy1) - clean vs noisy -> label=0
+            
+            batch_size = proj_clean1[i].size(0)
+            
+            # Concatenate positive and negative pairs
+            features_a = torch.cat([proj_clean1[i], proj_clean1[i]], dim=0)  # [2*B, C, H, W]
+            features_b = torch.cat([proj_clean2[i], proj_noisy1[i]], dim=0)  # [2*B, C, H, W]
+            
+            # Create labels: 1 for positive pairs (similar), 0 for negative pairs (dissimilar)
+            labels = torch.cat([
+                torch.ones(batch_size, device=device),   # positive pairs
+                torch.zeros(batch_size, device=device)   # negative pairs
+            ], dim=0)  # [2*B]
+            
+            # Compute contrastive loss
+            loss_c = contrastive_loss(
+                features1=features_a,
+                features2=features_b,
+                labels=labels,
+                margin=margin
+            )
+            loss_contrastive_total += loss_c
+            
+            # Reconstruction loss: only on clean features
+            loss_r = F.mse_loss(proj_clean1[i], features1[i])
+            loss_recon_total += loss_r
+        
+        # Average over scales
+        loss_contrastive_avg = loss_contrastive_total / len(proj_clean1)
+        loss_recon_avg = loss_recon_total / len(proj_clean1)
+        
+        # Total loss
+        loss_proj = lambda_c * loss_contrastive_avg + lambda_r * loss_recon_avg
+        
+        # Backward and optimize
+        optimizer_proj.zero_grad()
+        loss_proj.backward()
+        optimizer_proj.step()
+        
+        # Update meters
+        loss_contrastive_meter.update(loss_contrastive_avg.item())
+        loss_recon_meter.update(loss_recon_avg.item())
+        loss_total_meter.update(loss_proj.item())
+        
+        if (step + 1) % args.log_interval == 0 or (step + 1) == len(dataloader_pair):
+            print(
+                f"Epoch {epoch+1} [PROJ] Step [{step+1}/{len(dataloader_pair)}] "
+                f"Loss: {loss_total_meter.avg:.4f} "
+                f"(Contrastive: {loss_contrastive_meter.avg:.4f}, Recon: {loss_recon_meter.avg:.4f})"
+            )
+    
+    training_time = time.time() - start_time
+    print(f"⏱️  Projection training epoch time: {int(training_time // 60)}m {int(training_time % 60)}s")
+    
+    # Log to wandb
+    wandb.log({
+        "Projection Loss Contrastive": loss_contrastive_meter.avg,
+        "Projection Loss Reconstruction": loss_recon_meter.avg,
+        "Projection Loss Total": loss_total_meter.avg,
+    }, step=epoch + 1)
+    
+    return loss_contrastive_meter.avg, loss_recon_meter.avg, loss_total_meter.avg
+
+
 def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
     start_time = time.time()
     model.train()
@@ -242,9 +490,11 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
         loss_pure_meter = utils.AverageMeter()
         loss_adv_meter = utils.AverageMeter()
     
+    device = args.device if hasattr(args, 'device') else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
     for step, data in enumerate(dataloader):
         # Forward pass
-        data = data.cuda()
+        data = data.to(device)
         
         if use_adversarial:
             # Determine strategy
@@ -352,6 +602,7 @@ def compute_threshold(val_dataloader, model, model_type="FastFlow", use_lof=Fals
     """
     model.eval()
     loss_values = []
+    device = model.nf_flows[0].parameters().__next__().device  # Get device from model
     
     for batch in val_dataloader:
         # Validation set returns only images (no labels) since is_train=True and is_val=True
@@ -360,7 +611,7 @@ def compute_threshold(val_dataloader, model, model_type="FastFlow", use_lof=Fals
             data, _ = batch
         else:
             data = batch
-        data = data.cuda()
+        data = data.to(device)
 
         with torch.no_grad():
             ret = model(data) if model_type == "FastFlow" else model(data, eval_mode=True)
@@ -456,8 +707,10 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
     model.eval()
     labels_list = []
     preds_list = []
+    device = model.nf_flows[0].parameters().__next__().device  # Get device from model
+    
     for data, targets in dataloader:
-        data, targets = data.cuda(), targets.cuda()
+        data, targets = data.to(device), targets.to(device)
         with torch.no_grad():
             ret = model(data) if model_type == "FastFlow" else model(data, eval_mode=True)
         
@@ -680,6 +933,17 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
 def train(args, config):
     checkpoint_dir = const.CHECKPOINT_DIR
     os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Validate conflicting options
+    use_proj = hasattr(args, 'use_proj_layer') and args.use_proj_layer == 1
+    use_adv = hasattr(args, 'use_adversarial') and args.use_adversarial == 1
+    
+    if use_proj and use_adv:
+        raise ValueError(
+            "Cannot use both --use_proj_layer and --use_adversarial simultaneously. "
+            "These options have conflicting noise application strategies. "
+            "Please choose only one."
+        )
 
     wandb.init(
         entity="orazio-mattia",
@@ -695,12 +959,46 @@ def train(args, config):
         model.load_state_dict(checkpoint["model_state_dict"])
         print('Model loaded!')
     
-    model.cuda()
+    # GPU Selection
+    if args.gpu_id is not None:
+        # Manual GPU selection
+        device = torch.device(f'cuda:{args.gpu_id}')
+        print(f"📌 Using manually specified GPU {args.gpu_id}")
+    else:
+        # Automatic GPU selection (default behavior)
+        gpu_id = select_best_gpu()
+        if gpu_id is not None:
+            device = torch.device(f'cuda:{gpu_id}')
+        else:
+            device = torch.device('cpu')
+            print("⚠️  No GPU available, using CPU")
+    
+    model.to(device)
+    print(f"✓ Model moved to {device}")
+    
+    # Save device to args for use in training functions
+    args.device = device
 
-    optimizer = build_optimizer(args, model, args.model_type, config)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=args.lr_decay, patience=args.lr_patience, verbose=True) if args.scheduler==1 else None
+    # Build optimizer(s)
+    optimizer_result = build_optimizer(args, model, args.model_type, config)
+    
+    # Handle two cases: single optimizer or tuple of (optimizer_proj, optimizer_fastflow)
+    if use_proj:
+        optimizer_proj, optimizer_fastflow = optimizer_result
+        scheduler_proj = None  # No scheduler for projection layer
+        scheduler_fastflow = ReduceLROnPlateau(optimizer_fastflow, mode='min', factor=args.lr_decay, patience=args.lr_patience, verbose=True) if args.scheduler==1 else None
+    else:
+        optimizer = optimizer_result
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=args.lr_decay, patience=args.lr_patience, verbose=True) if args.scheduler==1 else None
 
-    train_dataloader = build_train_data_loader(args, config)
+    # Build dataloaders
+    if use_proj:
+        # Need both pair dataloader (for projection training) and normal dataloader (for FastFlow training)
+        pair_dataloader = build_pair_data_loader(args, config)
+        train_dataloader = build_train_data_loader(args, config)
+    else:
+        train_dataloader = build_train_data_loader(args, config)
+    
     val_dataloader = build_val_data_loader(args, config)
     test_dataloader, class2idx = build_test_data_loader(args, config)
     
@@ -708,7 +1006,38 @@ def train(args, config):
     patience_counter = 0
     
     for epoch in range(args.num_epochs):
-        train_mean, train_std, _ = train_one_epoch(train_dataloader, model, optimizer, epoch, args, scheduler=scheduler)
+        # ==== PHASE 1: Train Projection Layer (if enabled) ====
+        if use_proj:
+            print(f"\n{'='*60}")
+            print(f"EPOCH {epoch+1}/{args.num_epochs} - PHASE 1: Training Projection Layer")
+            print(f"{'='*60}")
+            
+            # Freeze FastFlow, unfreeze projection
+            model.freeze_fastflow()
+            model.unfreeze_projection_layers()
+            
+            loss_c, loss_r, loss_proj_total = train_projection_one_epoch(
+                pair_dataloader, model, optimizer_proj, epoch, args
+            )
+        
+        # ==== PHASE 2: Train FastFlow ====
+        if use_proj:
+            print(f"\n{'='*60}")
+            print(f"EPOCH {epoch+1}/{args.num_epochs} - PHASE 2: Training FastFlow")
+            print(f"{'='*60}")
+            
+            # Freeze projection, unfreeze FastFlow
+            model.freeze_projection_layers()
+            model.unfreeze_fastflow()
+            
+            train_mean, train_std, _ = train_one_epoch(
+                train_dataloader, model, optimizer_fastflow, epoch, args, scheduler=scheduler_fastflow
+            )
+        else:
+            # Standard training without projection layer
+            train_mean, train_std, _ = train_one_epoch(
+                train_dataloader, model, optimizer, epoch, args, scheduler=scheduler
+            )
         
         current_acc = -1
         
@@ -754,14 +1083,21 @@ def train(args, config):
                 wandb.run.summary["best_accuracy"] = best_acc
                 
                 checkpoint_path = os.path.join(checkpoint_dir, "best.pt")
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state_dict": model.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict()
-                    },
-                    checkpoint_path,
-                )
+                
+                # Save checkpoint with appropriate optimizer state
+                checkpoint_dict = {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                }
+                
+                if use_proj:
+                    checkpoint_dict["optimizer_proj_state_dict"] = optimizer_proj.state_dict()
+                    checkpoint_dict["optimizer_fastflow_state_dict"] = optimizer_fastflow.state_dict()
+                else:
+                    checkpoint_dict["optimizer_state_dict"] = optimizer.state_dict()
+                
+                torch.save(checkpoint_dict, checkpoint_path)
+                
                 # Save threshold information (only save fields that exist)
                 # Note: LOF object cannot be saved in npz, only with joblib
                 save_dict = {
@@ -822,6 +1158,9 @@ if __name__ == "__main__":
 
         if args.use_augs == 1:
             args.run_name += "_augs"
+        
+        if args.use_proj_layer == 1:
+            args.run_name += f"_proj-lc{args.lambda_contrastive}_lr{args.lambda_reconstruction}_hr{args.proj_hidden_ratio}"
 
         if args.use_adversarial == 1:
             args.run_name += f"_adv-{args.adv_strategy}_lambda{args.adv_lambda}_noise{args.noise_std}_{args.noise_schedule}"

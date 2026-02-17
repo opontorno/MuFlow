@@ -437,3 +437,64 @@ class RobustnessAttacks:
             return image.transpose(Image.FLIP_LEFT_RIGHT)
         else:
             raise ValueError("Horizontal flip requires PIL Image")
+
+
+class PairDataset(DeepFakeDataset):
+    """
+    Dataset that returns pairs of images for contrastive learning.
+    
+    This dataset extends DeepFakeDataset to return pairs of images
+    from the same class (both real). Used for training projection layers
+    with contrastive learning.
+    
+    Returns:
+        Tuple of two images (image1, image2) from the same class
+    """
+    
+    def __init__(self, *args, **kwargs):
+        """Initialize PairDataset with same arguments as DeepFakeDataset"""
+        super(PairDataset, self).__init__(*args, **kwargs)
+        
+        # Filter only real images (label == 0) for training
+        if self.is_train:
+            real_mask = np.array(self.labels) == 0
+            self.image_files = self.image_files[real_mask]
+            self.labels = self.labels[real_mask]
+            
+            if len(self.image_files) == 0:
+                raise ValueError("No real images found in training set for PairDataset")
+    
+    def __getitem__(self, index):
+        """
+        Get a pair of images.
+        
+        Returns both the indexed image and another random image from the same class (real).
+        This creates positive pairs for contrastive learning.
+        
+        Args:
+            index: Index of the first image
+            
+        Returns:
+            Tuple (image1, image2): Two images from real class
+        """
+        # Get first image
+        image_file1 = self.image_files[index]
+        image1 = Image.open(image_file1).convert("RGB")
+        
+        # Get second image (different from first, same class)
+        # Sample another random real image
+        other_index = index
+        while other_index == index:
+            other_index = np.random.randint(0, len(self.image_files))
+        
+        image_file2 = self.image_files[other_index]
+        image2 = Image.open(image_file2).convert("RGB")
+        
+        # Apply transforms
+        image1 = self.image_transform(image1).float()
+        image2 = self.image_transform(image2).float()
+        
+        return image1, image2
+    
+    def __len__(self):
+        return len(self.image_files)

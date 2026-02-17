@@ -45,12 +45,10 @@ def parse_args():
 
     parser.add_argument('--use_augs', type=int, default=0, choices=[0, 1], help="Whether to use data augmentation")
     parser.add_argument('--use_fourier', type=int, default=0, choices=[0, 1], help="Whether to use Fourier transform")
-    parser.add_argument('--use_proj', type=int, default=0, choices=[0, 1], help="Whether to use projection layer")
     parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
     parser.add_argument('--model_type', type=str, choices=['FastFlow', 'VAE'], default='FastFlow', help="Choose the model to train")
     parser.add_argument('--on_celeba', action='store_true', help="Use celeba dataset")
     parser.add_argument('--num_workers', type=int, default=4, help="number of data loading workers")
-    parser.add_argument('--projection_type', type=str, default='conv', choices=['conv', 'mlp', 'autoencoder', 'identity'], help="Type of projection layer")
     parser.add_argument('--pooling_type', type=str, default='mean', choices=['mean', 'flatten', 'max', 'mean_std'], help="Spatial pooling type: mean, flatten, max, or mean_std")
     parser.add_argument('--n_components', type=int, default=1, help="Number of GMM components")
 
@@ -156,8 +154,6 @@ def build_model(config, model_type, args):
             in_channels=3,  # Always 3 channels (RGB or replicated Fourier magnitude)
             backbone_weights=args.backbone_weights if hasattr(args, 'backbone_weights') and args.backbone_weights else None,
             out_indices=config.get("out_indices", [1, 2, 3]),  # Default [1,2,3] if not specified
-            use_proj=True if hasattr(args, 'use_proj') and args.use_proj == 1 else False,
-            projection_type=getattr(args, 'projection_type', 'conv'),
             pooling_type=pooling_type
         )
         print(

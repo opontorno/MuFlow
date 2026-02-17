@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import constants as const
-from projection_layers import create_projection_layer
+from proj_layer import ProjectionLayer
 
 import numpy as np
 import pdb
@@ -65,11 +65,11 @@ class FastFlow(nn.Module):
         gmm_values=None,
         in_channels=3,
         out_indices=[1, 2, 3],
-        use_proj=False,
-        projection_type='conv',
         pooling_type='mean',
         use_adversarial=False,
         noise_differentiable=False,
+        use_proj_layer=False,
+        proj_hidden_ratio=0.5,
     ):
         super(FastFlow, self).__init__()
         assert (
@@ -110,17 +110,14 @@ class FastFlow(nn.Module):
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
 
-        # Projection layer: Use factory pattern to create projection layers
-        self.use_proj = use_proj
-        self.projection_type = projection_type
-        if self.use_proj:
+        # Projection layers for contrastive learning
+        self.use_proj_layer = use_proj_layer
+        if self.use_proj_layer:
             self.projection_layers = nn.ModuleList()
             for in_channels in channels:
-                # Create projection layer using factory
-                proj_layer = create_projection_layer(
-                    projection_type=projection_type,
+                proj_layer = ProjectionLayer(
                     in_channels=in_channels,
-                    hidden_ratio=0.5  # Can be made configurable
+                    hidden_ratio=proj_hidden_ratio
                 )
                 self.projection_layers.append(proj_layer)
         else:
@@ -177,22 +174,24 @@ class FastFlow(nn.Module):
         
         return noisy_features
     
-    def process_features(self, features):
+    def process_features(self, features, use_projection=True):
         """
-        Process features through projection (if enabled) and normalizing flows.
+        Process features through projection layers (if enabled) and normalizing flows.
         
         Args:
             features: List of feature tensors
+            use_projection: Whether to apply projection layers (default: True)
         
         Returns:
-            Dictionary with 'loss' and 'mahalanobis' keys
+            Dictionary with 'loss', 'mahalanobis', and optionally 'projected_features'
         """
-        # Apply projection layer if enabled
-        if self.use_proj:
+        # Apply projection layers if enabled
+        projected_features = None
+        if self.use_proj_layer and use_projection and self.projection_layers is not None:
             projected_features = []
             for i, feature in enumerate(features):
-                feature_projected = self.projection_layers[i](feature)
-                projected_features.append(feature_projected)
+                proj_feat = self.projection_layers[i](feature)
+                projected_features.append(proj_feat)
             features = projected_features
         
         loss = []
@@ -310,3 +309,34 @@ class FastFlow(nn.Module):
         else:  # 'pure_only' or standard forward
             # Only process pure features
             return self.process_features(features)
+    
+    def freeze_projection_layers(self):
+        """Freeze projection layers for training FastFlow"""
+        if self.projection_layers is not None:
+            for proj_layer in self.projection_layers:
+                for param in proj_layer.parameters():
+                    param.requires_grad = False
+            print("Projection layers frozen")
+    
+    def unfreeze_projection_layers(self):
+        """Unfreeze projection layers for training them"""
+        if self.projection_layers is not None:
+            for proj_layer in self.projection_layers:
+                for param in proj_layer.parameters():
+                    param.requires_grad = True
+            print("Projection layers unfrozen")
+    
+    def freeze_fastflow(self):
+        """Freeze FastFlow (normalizing flows) for training projection layers"""
+        for nf_flow in self.nf_flows:
+            for param in nf_flow.parameters():
+                param.requires_grad = False
+        print("FastFlow frozen")
+    
+    def unfreeze_fastflow(self):
+        """Unfreeze FastFlow for training"""
+        for nf_flow in self.nf_flows:
+            for param in nf_flow.parameters():
+                param.requires_grad = True
+        print("FastFlow unfrozen")
+
