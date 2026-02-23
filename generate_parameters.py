@@ -11,8 +11,8 @@ import yaml
 import argparse
 from sklearn.manifold import TSNE
 from sklearn.mixture import GaussianMixture
-import FastFlow.constants as const
-from fourier_utils import calculate_fourier_magnitude_rgb
+from muflow import constants as const
+from muflow.fourier_utils import calculate_fourier_magnitude_rgb
 from tqdm import tqdm
 import pdb
 
@@ -29,7 +29,7 @@ model_name = args.model_name
 reals = args.reals
 use_fourier = args.use_fourier
 
-config_path = f"{const.WORKING_DIR}/FastFlow/configs/{model_name}.yaml" 
+config_path = f"{const.WORKING_DIR}/configs/{model_name}.yaml" 
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 print(f"Use Fourier: {use_fourier}")

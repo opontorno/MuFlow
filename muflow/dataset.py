@@ -1,4 +1,4 @@
-import os, sys
+import os
 from glob import glob
 import torch
 from torch.utils.data import Dataset
@@ -8,15 +8,13 @@ import random
 import io
 import numpy as np
 import cv2
-import constants as c
+from muflow import constants as c
 from collections import Counter
 from random import choices
 import pandas as pd
-import pdb
 from tqdm import tqdm
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from fourier_utils import FourierMagnitudeTransform, ToTensorNoScale
+from muflow.fourier_utils import FourierMagnitudeTransform, ToTensorNoScale
 
 
 DATA_DIR = "/media/orazio_mattia_group/ad4dd"

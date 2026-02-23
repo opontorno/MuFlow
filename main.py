@@ -11,10 +11,10 @@ import wandb
 import joblib
 import GPUtil
 
-import constants as const
-import dataset
-import fastflow
-import utils
+from muflow import constants as const
+from muflow import dataset
+from muflow import model as fastflow
+from muflow import utils
 
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -64,12 +64,12 @@ def parse_args():
     parser.add_argument('--percentile', type=int, default=95)
     
     # Projection Layer Hyperparameters
-    parser.add_argument('--use_proj_layer', type=int, default=0, choices=[0, 1], help="Whether to use projection layer with contrastive learning")
-    parser.add_argument('--proj_hidden_ratio', type=float, default=0.5, help="Hidden layer ratio for projection layer")
-    parser.add_argument('--lambda_contrastive', type=float, default=1.0, help="Weight for contrastive loss")
-    parser.add_argument('--lambda_reconstruction', type=float, default=1.0, help="Weight for reconstruction loss")
-    parser.add_argument('--proj_noise_std', type=float, default=0.1, help="Noise std for creating negative pairs in projection training")
-    parser.add_argument('--contrastive_margin', type=float, default=2.0, help="Margin for contrastive loss")
+    parser.add_argument('-use_proj', '--use_proj_layer', type=int, default=0, choices=[0, 1], help="Whether to use projection layer with contrastive learning")
+    parser.add_argument('-proj_hidden', '--proj_hidden_ratio', type=float, default=0.5, help="Hidden layer ratio for projection layer")
+    parser.add_argument('-l_contr', '--lambda_contrastive', type=float, default=1.0, help="Weight for contrastive loss")
+    parser.add_argument('-l_rec', '--lambda_reconstruction', type=float, default=1.0, help="Weight for reconstruction loss")
+    parser.add_argument('-proj_noise', '--proj_noise_std', type=float, default=0.1, help="Noise std for creating negative pairs in projection training")
+    parser.add_argument('-margin', '--contrastive_margin', type=float, default=2.0, help="Margin for contrastive loss")
 
     # Adversarial Training Hyperparameters
     parser.add_argument('--use_adversarial', type=int, default=0, choices=[0, 1], help="Whether to use adversarial training")
@@ -79,6 +79,14 @@ def parse_args():
     parser.add_argument('--noise_schedule', type=str, default='fixed', choices=['fixed', 'linear', 'exponential'], help="Noise schedule during training")
     parser.add_argument('--noise_std_max', type=float, default=1.0, help="Maximum std if using noise schedule")
     parser.add_argument('--noise_differentiable', type=int, default=0, choices=[0, 1], help="Whether noise should be differentiable")
+
+    # Autoencoder Training Hyperparameters
+    parser.add_argument('--use_autoencoder', type=int, default=0, choices=[0, 1], help="Whether to use convolutional autoencoder on backbone features")
+    parser.add_argument('--ae_lambda', type=float, default=1.0, help="Weight for autoencoder reconstruction loss")
+    parser.add_argument('--ae_hidden_ratio', type=float, default=0.5, help="Hidden channel ratio for autoencoder bottleneck")
+    parser.add_argument('--ae_training_mode', type=str, default='two_phase', choices=['two_phase', 'end_to_end'],
+                        help="AE training strategy: 'two_phase' alternates AE/NF phases per epoch; "
+                             "'end_to_end' trains AE+NF jointly with a single optimizer")
 
     parser.add_argument('-patience', '--early_stopping_patience', type=float, default=float("inf"), help="Patience epochs for early stopping based on Val Acc")
 
@@ -170,7 +178,7 @@ def build_pair_data_loader(args, config):
     Build dataloader for projection layer training with PairDataset.
     Returns pairs of real images for contrastive learning.
     """
-    from dataset import PairDataset
+    from muflow.dataset import PairDataset
     
     # Create PairDataset instance
     pair_dataset = PairDataset(
@@ -240,6 +248,8 @@ def build_model(config, model_type, args):
             noise_differentiable=adversarial_config['noise_differentiable'],
             use_proj_layer=args.use_proj_layer == 1 if hasattr(args, 'use_proj_layer') else False,
             proj_hidden_ratio=args.proj_hidden_ratio if hasattr(args, 'proj_hidden_ratio') else 0.5,
+            use_autoencoder=args.use_autoencoder == 1 if hasattr(args, 'use_autoencoder') else False,
+            ae_hidden_ratio=args.ae_hidden_ratio if hasattr(args, 'ae_hidden_ratio') else 0.5,
         )
         print(
             "Model A.D. Param#: {}".format(
@@ -254,14 +264,54 @@ def build_model(config, model_type, args):
 def build_optimizer(args, model, model_type, config):
     """
     Build optimizer(s) for the model.
-    
+
     Returns:
-        If use_proj_layer=0: single optimizer for all parameters
-        If use_proj_layer=1: tuple (optimizer_proj, optimizer_fastflow)
+        Standard training : single optimizer for all parameters
+        use_proj_layer=1  : tuple (optimizer_proj, optimizer_fastflow)
+        use_autoencoder=1 : tuple (optimizer_ae, optimizer_fastflow)
     """
     if model_type == "FastFlow":
         use_proj = hasattr(args, 'use_proj_layer') and args.use_proj_layer == 1
-        
+        use_ae = hasattr(args, 'use_autoencoder') and args.use_autoencoder == 1
+
+        # ---- Autoencoder branch ----
+        if use_ae and model.autoencoders is not None:
+            ae_mode = getattr(args, 'ae_training_mode', 'two_phase')
+
+            if ae_mode == 'end_to_end':
+                # Single optimizer: AE + NF flows trained jointly
+                joint_params = list(model.autoencoders.parameters()) + list(model.nf_flows.parameters())
+                if args.optimizer == "AdamW":
+                    return torch.optim.AdamW(joint_params, lr=args.lr, weight_decay=args.weight_decay)
+                elif args.optimizer == "sgd":
+                    return torch.optim.SGD(joint_params, lr=args.lr, weight_decay=args.weight_decay, momentum=0.9)
+                else:
+                    raise ValueError(f"Unknown optimizer: {args.optimizer}")
+            else:
+                # two_phase: separate optimizers
+                if args.optimizer == "AdamW":
+                    optimizer_ae = torch.optim.AdamW(
+                        model.autoencoders.parameters(),
+                        lr=args.lr, weight_decay=args.weight_decay
+                    )
+                    optimizer_fastflow = torch.optim.AdamW(
+                        model.nf_flows.parameters(),
+                        lr=args.lr, weight_decay=args.weight_decay
+                    )
+                elif args.optimizer == "sgd":
+                    optimizer_ae = torch.optim.SGD(
+                        model.autoencoders.parameters(),
+                        lr=args.lr, weight_decay=args.weight_decay, momentum=0.9
+                    )
+                    optimizer_fastflow = torch.optim.SGD(
+                        model.nf_flows.parameters(),
+                        lr=args.lr, weight_decay=args.weight_decay, momentum=0.9
+                    )
+                else:
+                    raise ValueError(f"Unknown optimizer: {args.optimizer}")
+                return optimizer_ae, optimizer_fastflow
+
+        # ---- Projection-layer branch ----
         if use_proj and model.projection_layers is not None:
             # Create two separate optimizers for end-to-end training
             if args.optimizer == "AdamW":
@@ -309,6 +359,96 @@ def build_optimizer(args, model, model_type, config):
         raise ValueError(f"Unknown model type: {model_type}")
 
 
+def train_autoencoder_one_epoch(dataloader, model, optimizer_ae, epoch, args):
+    """
+    Train autoencoder layers for one epoch using only reconstruction loss.
+    FastFlow (nf_flows) is frozen during this phase.
+
+    Args:
+        dataloader: Standard training DataLoader
+        model: FastFlow model with autoencoders
+        optimizer_ae: Optimizer for autoencoder parameters
+        epoch: Current epoch number
+        args: Arguments namespace
+
+    Returns:
+        Average reconstruction loss for the epoch
+    """
+    import torch.nn.functional as F
+
+    start_time = time.time()
+    model.feature_extractor.eval()
+    model.nf_flows.eval()
+    for ae in model.autoencoders:
+        ae.train()
+
+    recon_meter = utils.AverageMeter()
+    device = args.device if hasattr(args, 'device') else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    for step, data in enumerate(dataloader):
+        data = data.to(device)
+
+        with torch.no_grad():
+            # ---- Extract and normalise backbone features (frozen) ----
+            if isinstance(model.feature_extractor, timm.models.vision_transformer.VisionTransformer):
+                x = model.feature_extractor.patch_embed(data)
+                cls_token = model.feature_extractor.cls_token.expand(x.shape[0], -1, -1)
+                if model.feature_extractor.dist_token is None:
+                    x = torch.cat((cls_token, x), dim=1)
+                else:
+                    x = torch.cat((cls_token,
+                                   model.feature_extractor.dist_token.expand(x.shape[0], -1, -1),
+                                   x), dim=1)
+                x = model.feature_extractor.pos_drop(x + model.feature_extractor.pos_embed)
+                for i in range(8):
+                    x = model.feature_extractor.blocks[i](x)
+                x = model.feature_extractor.norm(x)
+                x = x[:, 2:, :]
+                N, _, C = x.shape
+                x = x.permute(0, 2, 1)
+                x = x.reshape(N, C, model.input_size // 16, model.input_size // 16)
+                features = [x]
+            elif isinstance(model.feature_extractor, timm.models.cait.Cait):
+                x = model.feature_extractor.patch_embed(data)
+                x = x + model.feature_extractor.pos_embed
+                x = model.feature_extractor.pos_drop(x)
+                for i in range(41):
+                    x = model.feature_extractor.blocks[i](x)
+                N, _, C = x.shape
+                x = model.feature_extractor.norm(x)
+                x = x.permute(0, 2, 1)
+                x = x.reshape(N, C, model.input_size // 16, model.input_size // 16)
+                features = [x]
+            else:
+                features = model.feature_extractor(data)
+                features = [model.norms[i](feat) for i, feat in enumerate(features)]
+
+        # ---- Reconstruction loss over all scales ----
+        recon_losses = []
+        for i, feat in enumerate(features):
+            x_hat = model.autoencoders[i](feat)
+            recon_losses.append(F.mse_loss(x_hat, feat))
+        recon_loss = torch.stack(recon_losses).mean()
+
+        optimizer_ae.zero_grad()
+        recon_loss.backward()
+        optimizer_ae.step()
+
+        recon_meter.update(recon_loss.item())
+
+        if (step + 1) % args.log_interval == 0 or (step + 1) == len(dataloader):
+            print(
+                f"Epoch {epoch+1} [AE] Step [{step+1}/{len(dataloader)}] "
+                f"Recon Loss: {recon_meter.avg:.4f}"
+            )
+
+    training_time = time.time() - start_time
+    print(f"\u23f1\ufe0f  AE training epoch time: {int(training_time // 60)}m {int(training_time % 60)}s")
+
+    wandb.log({"AE Recon Loss": recon_meter.avg}, step=epoch + 1)
+    return recon_meter.avg
+
+
 def get_noise_std(epoch, args):
     """Calculate noise std based on schedule"""
     if args.noise_schedule == 'fixed':
@@ -353,7 +493,7 @@ def train_projection_one_epoch(dataloader_pair, model, optimizer_proj, epoch, ar
     Returns:
         Tuple of (avg_contrastive_loss, avg_reconstruction_loss, avg_total_loss)
     """
-    from proj_layer import contrastive_loss
+    from muflow.proj_layer import contrastive_loss
     
     start_time = time.time()
     
@@ -476,13 +616,14 @@ def train_projection_one_epoch(dataloader_pair, model, optimizer_proj, epoch, ar
     return loss_contrastive_meter.avg, loss_recon_meter.avg, loss_total_meter.avg
 
 
-def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
+def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None, ae_lambda=0.0):
     start_time = time.time()
     model.train()
     loss_meter = utils.AverageMeter()
     loss_values = []
-    
+
     use_adversarial = args.use_adversarial == 1 if hasattr(args, 'use_adversarial') else False
+    use_autoencoder = args.use_autoencoder == 1 if hasattr(args, 'use_autoencoder') else False
     current_noise_std = get_noise_std(epoch, args) if use_adversarial else 0.0
     
     # Separate meters for adversarial training
@@ -499,7 +640,6 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
         if use_adversarial:
             # Determine strategy
             if args.adv_strategy == 'same_batch':
-                # Process both pure and noisy features in same forward pass
                 ret = model(data, noise_std=current_noise_std, adversarial_mode='same_batch')
                 loss_pure = ret["loss_pure"].mean()
                 loss_adv = ret["loss_adv"].mean()
@@ -507,12 +647,11 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
                 loss_pure_meter.update(loss_pure.item())
                 loss_adv_meter.update(loss_adv.item())
             else:
-                # Alternate or cycle strategy
                 use_noise = should_use_noise_batch(step, args.adv_strategy)
                 if use_noise:
                     ret = model(data, noise_std=current_noise_std, adversarial_mode='noisy_only')
                     loss_adv = ret["loss"].mean()
-                    loss = args.adv_lambda * loss_adv  # Use lambda weight
+                    loss = args.adv_lambda * loss_adv
                     loss_adv_meter.update(loss_adv.item())
                 else:
                     ret = model(data, noise_std=0.0, adversarial_mode='pure_only')
@@ -520,8 +659,8 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
                     loss = loss_pure
                     loss_pure_meter.update(loss_pure.item())
         else:
-            # Standard training without adversarial
-            ret = model(data)
+            # Standard training (with or without autoencoder)
+            ret = model(data, ae_lambda=ae_lambda)
             loss = ret["loss"].mean()
         
         optimizer.zero_grad()
@@ -575,6 +714,8 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
         wandb_dict["Noise std"] = current_noise_std
         wandb_dict["Train Loss Pure Mean"] = loss_pure_meter.avg
         wandb_dict["Train Loss Adv Mean"] = loss_adv_meter.avg
+    if use_autoencoder:
+        wandb_dict["ae_lambda"] = ae_lambda
     wandb.log(wandb_dict, step=epoch + 1)
     
     training_time = time.time() - start_time
@@ -937,11 +1078,12 @@ def train(args, config):
     # Validate conflicting options
     use_proj = hasattr(args, 'use_proj_layer') and args.use_proj_layer == 1
     use_adv = hasattr(args, 'use_adversarial') and args.use_adversarial == 1
-    
-    if use_proj and use_adv:
+    use_ae = hasattr(args, 'use_autoencoder') and args.use_autoencoder == 1
+
+    active_modes = [m for m, f in [("--use_proj_layer", use_proj), ("--use_adversarial", use_adv), ("--use_autoencoder", use_ae)] if f]
+    if len(active_modes) > 1:
         raise ValueError(
-            "Cannot use both --use_proj_layer and --use_adversarial simultaneously. "
-            "These options have conflicting noise application strategies. "
+            f"The following options are mutually exclusive: {', '.join(active_modes)}. "
             "Please choose only one."
         )
 
@@ -981,19 +1123,26 @@ def train(args, config):
 
     # Build optimizer(s)
     optimizer_result = build_optimizer(args, model, args.model_type, config)
-    
-    # Handle two cases: single optimizer or tuple of (optimizer_proj, optimizer_fastflow)
+
+    # Handle cases: standard / proj / autoencoder (two_phase or end_to_end)
+    ae_mode = getattr(args, 'ae_training_mode', 'two_phase')
     if use_proj:
         optimizer_proj, optimizer_fastflow = optimizer_result
-        scheduler_proj = None  # No scheduler for projection layer
-        scheduler_fastflow = ReduceLROnPlateau(optimizer_fastflow, mode='min', factor=args.lr_decay, patience=args.lr_patience, verbose=True) if args.scheduler==1 else None
+        scheduler_proj = None
+        scheduler_fastflow = ReduceLROnPlateau(optimizer_fastflow, mode='min', factor=args.lr_decay, patience=args.lr_patience, verbose=True) if args.scheduler == 1 else None
+    elif use_ae and ae_mode == 'two_phase':
+        optimizer_ae, optimizer_fastflow = optimizer_result
+        scheduler_ae = None
+        scheduler_fastflow = ReduceLROnPlateau(optimizer_fastflow, mode='min', factor=args.lr_decay, patience=args.lr_patience, verbose=True) if args.scheduler == 1 else None
+    elif use_ae and ae_mode == 'end_to_end':
+        optimizer = optimizer_result  # single joint optimizer
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=args.lr_decay, patience=args.lr_patience, verbose=True) if args.scheduler == 1 else None
     else:
         optimizer = optimizer_result
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=args.lr_decay, patience=args.lr_patience, verbose=True) if args.scheduler==1 else None
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=args.lr_decay, patience=args.lr_patience, verbose=True) if args.scheduler == 1 else None
 
     # Build dataloaders
     if use_proj:
-        # Need both pair dataloader (for projection training) and normal dataloader (for FastFlow training)
         pair_dataloader = build_pair_data_loader(args, config)
         train_dataloader = build_train_data_loader(args, config)
     else:
@@ -1006,35 +1155,59 @@ def train(args, config):
     patience_counter = 0
     
     for epoch in range(args.num_epochs):
-        # ==== PHASE 1: Train Projection Layer (if enabled) ====
+        # ================================================================
+        # PHASE 1: Train auxiliary module — only in two_phase modes
+        # ================================================================
         if use_proj:
             print(f"\n{'='*60}")
             print(f"EPOCH {epoch+1}/{args.num_epochs} - PHASE 1: Training Projection Layer")
             print(f"{'='*60}")
-            
-            # Freeze FastFlow, unfreeze projection
             model.freeze_fastflow()
             model.unfreeze_projection_layers()
-            
-            loss_c, loss_r, loss_proj_total = train_projection_one_epoch(
-                pair_dataloader, model, optimizer_proj, epoch, args
-            )
-        
-        # ==== PHASE 2: Train FastFlow ====
+            train_projection_one_epoch(pair_dataloader, model, optimizer_proj, epoch, args)
+
+        elif use_ae and ae_mode == 'two_phase':
+            print(f"\n{'='*60}")
+            print(f"EPOCH {epoch+1}/{args.num_epochs} - PHASE 1: Training Autoencoder (NF frozen)")
+            print(f"{'='*60}")
+            model.freeze_fastflow()
+            model.unfreeze_autoencoders()
+            train_autoencoder_one_epoch(train_dataloader, model, optimizer_ae, epoch, args)
+
+        # ================================================================
+        # PHASE 2: Train FastFlow (NF flows)
+        # ================================================================
         if use_proj:
             print(f"\n{'='*60}")
             print(f"EPOCH {epoch+1}/{args.num_epochs} - PHASE 2: Training FastFlow")
             print(f"{'='*60}")
-            
-            # Freeze projection, unfreeze FastFlow
             model.freeze_projection_layers()
             model.unfreeze_fastflow()
-            
             train_mean, train_std, _ = train_one_epoch(
                 train_dataloader, model, optimizer_fastflow, epoch, args, scheduler=scheduler_fastflow
             )
+        elif use_ae and ae_mode == 'two_phase':
+            print(f"\n{'='*60}")
+            print(f"EPOCH {epoch+1}/{args.num_epochs} - PHASE 2: Training FastFlow (AE frozen)")
+            print(f"{'='*60}")
+            model.freeze_autoencoders()
+            model.unfreeze_fastflow()
+            train_mean, train_std, _ = train_one_epoch(
+                train_dataloader, model, optimizer_fastflow, epoch, args,
+                scheduler=scheduler_fastflow,
+                ae_lambda=args.ae_lambda,
+            )
+        elif use_ae and ae_mode == 'end_to_end':
+            # AE + NF trained jointly — no phase split, single optimizer
+            model.unfreeze_autoencoders()
+            model.unfreeze_fastflow()
+            train_mean, train_std, _ = train_one_epoch(
+                train_dataloader, model, optimizer, epoch, args,
+                scheduler=scheduler,
+                ae_lambda=args.ae_lambda,
+            )
         else:
-            # Standard training without projection layer
+            # Standard training
             train_mean, train_std, _ = train_one_epoch(
                 train_dataloader, model, optimizer, epoch, args, scheduler=scheduler
             )
@@ -1093,7 +1266,11 @@ def train(args, config):
                 if use_proj:
                     checkpoint_dict["optimizer_proj_state_dict"] = optimizer_proj.state_dict()
                     checkpoint_dict["optimizer_fastflow_state_dict"] = optimizer_fastflow.state_dict()
+                elif use_ae and ae_mode == 'two_phase':
+                    checkpoint_dict["optimizer_ae_state_dict"] = optimizer_ae.state_dict()
+                    checkpoint_dict["optimizer_fastflow_state_dict"] = optimizer_fastflow.state_dict()
                 else:
+                    # end_to_end or standard: single optimizer
                     checkpoint_dict["optimizer_state_dict"] = optimizer.state_dict()
                 
                 torch.save(checkpoint_dict, checkpoint_path)
@@ -1160,10 +1337,13 @@ if __name__ == "__main__":
             args.run_name += "_augs"
         
         if args.use_proj_layer == 1:
-            args.run_name += f"_proj-lc{args.lambda_contrastive}_lr{args.lambda_reconstruction}_hr{args.proj_hidden_ratio}"
+            args.run_name += f"_proj-lc{args.lambda_contrastive}_lr{args.lambda_reconstruction}_noise{args.proj_noise_std}"
 
         if args.use_adversarial == 1:
             args.run_name += f"_adv-{args.adv_strategy}_lambda{args.adv_lambda}_noise{args.noise_std}_{args.noise_schedule}"
+
+        if args.use_autoencoder == 1:
+            args.run_name += f"_ae-{args.ae_training_mode}_lambda{args.ae_lambda}"
 
     const.CHECKPOINT_DIR += "/" + args.run_name 
 

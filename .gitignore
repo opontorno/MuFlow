@@ -6,3 +6,5 @@
 baselines/
 **/tmp.py
 parameters/*.npy
+scratch/
+*.bak

@@ -17,7 +17,7 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # === Hyperparameters ===
 model_name = "resnet50"
-config_path = f"FastFlow/configs/{model_name}.yaml"
+config_path = f"configs/{model_name}.yaml"
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 

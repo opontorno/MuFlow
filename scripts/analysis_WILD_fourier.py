@@ -11,14 +11,14 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageFile
 from sklearn.manifold import TSNE
 from sklearn.mixture import GaussianMixture
-from fourier_utils import calculate_fourier_magnitude_rgb
+from muflow.fourier_utils import calculate_fourier_magnitude_rgb
 
 # Enable loading of truncated images
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # === Hyperparameters ===
 model_name = "resnet18"
-config_path = f"FastFlow/configs/{model_name}.yaml"
+config_path = f"configs/{model_name}.yaml"
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 

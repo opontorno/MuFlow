@@ -7,11 +7,11 @@ import wandb
 from ignite.contrib import metrics
 import joblib
 
-import constants as const
-import dataset as dataset
-import fastflow
-#import vanillaVAE as vae
-import utils
+from muflow import constants as const
+from muflow import dataset
+from muflow import model as fastflow
+#from muflow import vae
+from muflow import utils
 
 import cv2, pdb
 import seaborn as sns

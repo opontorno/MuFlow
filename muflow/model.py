@@ -5,11 +5,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import constants as const
-from proj_layer import ProjectionLayer
+from muflow import constants as const
+from muflow.modules import ProjectionLayer, ConvAutoencoder
 
 import numpy as np
-import pdb
 
 
 def gaussian_nll_loss(output, mu, cov, log_jac_det):
@@ -70,6 +69,8 @@ class FastFlow(nn.Module):
         noise_differentiable=False,
         use_proj_layer=False,
         proj_hidden_ratio=0.5,
+        use_autoencoder=False,
+        ae_hidden_ratio=0.5,
     ):
         super(FastFlow, self).__init__()
         assert (
@@ -123,6 +124,20 @@ class FastFlow(nn.Module):
         else:
             self.projection_layers = None
 
+        # Convolutional autoencoders for feature reconstruction
+        self.use_autoencoder = use_autoencoder
+        if self.use_autoencoder:
+            self.autoencoders = nn.ModuleList()
+            for in_ch in channels:
+                self.autoencoders.append(
+                    ConvAutoencoder(
+                        in_channels=in_ch,
+                        hidden_ratio=ae_hidden_ratio,
+                    )
+                )
+        else:
+            self.autoencoders = None
+
         self.nf_flows = nn.ModuleList()
         for in_channels, scale in zip(channels, scales):
             self.nf_flows.append(
@@ -174,18 +189,20 @@ class FastFlow(nn.Module):
         
         return noisy_features
     
-    def process_features(self, features, use_projection=True):
+    def process_features(self, features, use_projection=True, ae_lambda=0.0):
         """
-        Process features through projection layers (if enabled) and normalizing flows.
-        
+        Process features through optional modules (projection / autoencoder)
+        and normalizing flows.
+
         Args:
             features: List of feature tensors
             use_projection: Whether to apply projection layers (default: True)
-        
+            ae_lambda: Weight for autoencoder reconstruction loss (default: 0.0)
+
         Returns:
-            Dictionary with 'loss', 'mahalanobis', and optionally 'projected_features'
+            Dictionary with 'loss', 'mahalanobis', and optionally 'recon_loss'
         """
-        # Apply projection layers if enabled
+        # ----- Projection layers (contrastive mode) -----
         projected_features = None
         if self.use_proj_layer and use_projection and self.projection_layers is not None:
             projected_features = []
@@ -193,24 +210,34 @@ class FastFlow(nn.Module):
                 proj_feat = self.projection_layers[i](feature)
                 projected_features.append(proj_feat)
             features = projected_features
-        
+
+        # ----- Convolutional Autoencoder -----
+        recon_loss_total = None
+        if self.use_autoencoder and self.autoencoders is not None:
+            recon_losses = []
+            reconstructed = []
+            for i, feature in enumerate(features):
+                x_hat = self.autoencoders[i](feature)
+                recon_losses.append(F.mse_loss(x_hat, feature))
+                reconstructed.append(x_hat)
+            features = reconstructed  # NF sees reconstructed features
+            recon_loss_total = torch.stack(recon_losses).mean()
+
+        # ----- Normalizing Flows -----
         loss = []
         mahalanobis = []
         for i, feature in enumerate(features):
             output, log_jac_det = self.nf_flows[i](feature)
-            mu = self.means[i]
-            cov = self.covs[i]
-            
-            mu = torch.tensor(mu, device=output.device)
-            cov = torch.tensor(cov, device=output.device)
+            mu = torch.tensor(self.means[i], device=output.device)
+            cov = torch.tensor(self.covs[i], device=output.device)
 
             if self.pooling_type == 'mean':
-                output = output.mean((2,3))
+                output = output.mean((2, 3))
             elif self.pooling_type == 'max':
                 output = output.flatten(2).max(-1)[0]
             elif self.pooling_type == 'mean_std':
-                mean_output = output.mean((2,3))
-                std_output = output.std((2,3))
+                mean_output = output.mean((2, 3))
+                std_output = output.std((2, 3))
                 output = torch.cat([mean_output, std_output], dim=1)
             elif self.pooling_type == 'flatten':
                 output = output.mean(-1).flatten(1)
@@ -220,13 +247,24 @@ class FastFlow(nn.Module):
             loss_, maha_ = gaussian_nll_loss(output=output, mu=mu, cov=cov, log_jac_det=log_jac_det)
             loss.append(loss_)
             mahalanobis.append(maha_)
-        
-        return {
-            "loss": torch.stack(loss, dim=1).mean(1),
-            "mahalanobis": torch.stack(mahalanobis, dim=1).mean(1)
-        }
 
-    def forward(self, x, noise_std=0.0, adversarial_mode='pure_only'):
+        mahalanobis_loss = torch.stack(loss, dim=1).mean(1)  # (B,)
+
+        # ----- Combine losses -----
+        if recon_loss_total is not None and ae_lambda > 0.0:
+            combined_loss = mahalanobis_loss + ae_lambda * recon_loss_total
+        else:
+            combined_loss = mahalanobis_loss
+
+        result = {
+            "loss": combined_loss,
+            "mahalanobis": torch.stack(mahalanobis, dim=1).mean(1),
+        }
+        if recon_loss_total is not None:
+            result["recon_loss"] = recon_loss_total
+        return result
+
+    def forward(self, x, noise_std=0.0, adversarial_mode='pure_only', ae_lambda=0.0):
         """
         Forward pass with optional adversarial training.
         
@@ -285,30 +323,22 @@ class FastFlow(nn.Module):
         
         # Adversarial training logic
         if adversarial_mode == 'same_batch':
-            # Process both pure and noisy features
             noisy_features = self.add_gaussian_noise(features, noise_std)
-            
-            # Process pure features
-            ret_pure = self.process_features(features)
-            
-            # Process noisy features
-            ret_noisy = self.process_features(noisy_features)
-            
+            ret_pure = self.process_features(features, ae_lambda=ae_lambda)
+            ret_noisy = self.process_features(noisy_features, ae_lambda=ae_lambda)
             return {
-                "loss": ret_pure["loss"],  # For compatibility
+                "loss": ret_pure["loss"],
                 "loss_pure": ret_pure["loss"],
                 "loss_adv": ret_noisy["loss"],
                 "mahalanobis": ret_pure["mahalanobis"],
             }
-        
+
         elif adversarial_mode == 'noisy_only':
-            # Only process noisy features
             noisy_features = self.add_gaussian_noise(features, noise_std)
-            return self.process_features(noisy_features)
-        
+            return self.process_features(noisy_features, ae_lambda=ae_lambda)
+
         else:  # 'pure_only' or standard forward
-            # Only process pure features
-            return self.process_features(features)
+            return self.process_features(features, ae_lambda=ae_lambda)
     
     def freeze_projection_layers(self):
         """Freeze projection layers for training FastFlow"""
@@ -339,4 +369,20 @@ class FastFlow(nn.Module):
             for param in nf_flow.parameters():
                 param.requires_grad = True
         print("FastFlow unfrozen")
+
+    def freeze_autoencoders(self):
+        """Freeze autoencoder layers"""
+        if self.autoencoders is not None:
+            for ae in self.autoencoders:
+                for param in ae.parameters():
+                    param.requires_grad = False
+            print("Autoencoders frozen")
+
+    def unfreeze_autoencoders(self):
+        """Unfreeze autoencoder layers"""
+        if self.autoencoders is not None:
+            for ae in self.autoencoders:
+                for param in ae.parameters():
+                    param.requires_grad = True
+            print("Autoencoders unfrozen")
 
