@@ -21,7 +21,7 @@ GANS = ['StyleGAN', 'StyleGAN2', 'StyleGAN3', 'STARGAN', 'AttGAN', 'GDWCT']
 DM_OPEN = ['Flux.1', 'Stable DIffusion 3.5', 'Stable Diffusion XL', 'Stable Cascade', 'Stable Diffusion Attend and Excite']
 DM_CLOSED = ['Dall-E 3', 'Midjourney', 'Starry AI', 'Deep AI', 'Hotpot AI', 'Nvidia Sana PAG', 'Tencent Hunyuan', 'Flux.1.1 Pro']
 
-MIX_2CLASS = ['StyleGAN', 'StyleGAN2', 'Stable DIffusion 3.5', 'Flux.1.1 Pro']
+MIX_2CLASS = ['STARGAN', 'StyleGAN2', 'Stable DIffusion 3.5', 'Flux.1.1 Pro']
 
 
 
@@ -30,7 +30,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Evaluate a MuFlow run. All settings are loaded automatically "
                     "from run_dir/run_config.yaml. Only eval-specific options are needed.")
-    parser.add_argument("run_dir", type=str,
+    parser.add_argument("--run_dir", type=str,
                         help="Directory of a training run (must contain best.pt, "
                              "thresholds.npz and run_config.yaml).")
     parser.add_argument("--test", type=str, default=None,
@@ -58,7 +58,7 @@ def parse_args():
 
     print(f"[eval] Run dir  : {args.run_dir}")
     print(f"[eval] Config   : {args.config}")
-    print(f"[eval] std_weight={args.std_weight}  alpha={args.alpha}")
+    print(f"[eval] alpha={args.alpha}")
     return args
 
 
@@ -84,18 +84,13 @@ def build_val_data_loader(args, config):
     )
 
 
-def compute_threshold(val_dataloader, model, model_type="FastFlow",
-                      use_lof=False, contamination='auto',
-                      use_percentile=False, percentile=95,
-                      alpha=0.1, std_weight=0.0):
+def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto', alpha=0.1):
     """
     Compute anomaly-detection threshold from the validation set (real images).
     Mirrors compute_threshold() in main.py exactly.
-    score = loss + std_weight * z_std
     """
     model.eval()
     loss_values = []
-    z_std_values = []
     device = next(model.nf_flows[0].parameters()).device
 
     for batch in val_dataloader:
@@ -105,34 +100,26 @@ def compute_threshold(val_dataloader, model, model_type="FastFlow",
             data = batch
         data = data.to(device)
         with torch.no_grad():
-            ret = model(data) if model_type == "FastFlow" else model(data, eval_mode=True)
-            if model_type == "FastFlow":
-                loss_values.append(ret["loss"].cpu())
-                z_std_values.append(ret["z_std"].cpu())
+            ret = model(data)
+            loss_values.append(ret["loss"].cpu())
 
     if not loss_values:
         raise ValueError("No validation samples found. Check val dataloader.")
 
     losses = torch.cat(loss_values).numpy()
-    z_stds = torch.cat(z_std_values).numpy()
-    scores = losses + std_weight * z_stds
-    mean, std = float(scores.mean()), float(scores.std())
+    mean, std = float(losses.mean()), float(losses.std())
 
     result = {
         'threshold': None,
         'mean': mean,
         'std': std,
         'losses': losses,
-        'scores': scores,
-        'std_weight': std_weight,
     }
 
     if use_lof:
         lof = LocalOutlierFactor(novelty=True, contamination=contamination, n_jobs=-1)
-        lof.fit(scores.reshape(-1, 1))
+        lof.fit(losses.reshape(-1, 1))
         result['lof'] = lof
-    elif use_percentile:
-        result['threshold'] = float(np.percentile(scores, percentile))
     else:
         z = norm.ppf(1 - alpha)
         result['l_threshold'] = float(mean - z * std)
@@ -140,7 +127,7 @@ def compute_threshold(val_dataloader, model, model_type="FastFlow",
 
     l = result.get('l_threshold')
     u = result.get('u_threshold')
-    bounds = f"[{l:.4f}, {u:.4f}]" if l is not None else "(LOF / percentile)"
+    bounds = f"[{l:.4f}, {u:.4f}]" if l is not None else "(LOF)"
     print(f"Threshold computation done.  mean={mean:.4f}  std={std:.4f}  {bounds}")
     return result
 
@@ -208,7 +195,7 @@ def create_dataloader_w_celeba(args, config, opt):
     return data_loader, {v: k for k, v in class_to_idx_.items()}
 
 
-def build_model(config, model_type, args):
+def build_model(config, args):
     out_indices = config.get("out_indices", [1, 2, 3])
     out_indices_str = str(out_indices)
     pooling_type = getattr(args, 'pooling_type', config.get('pooling_type', 'mean'))
@@ -222,28 +209,25 @@ def build_model(config, model_type, args):
     gmm_values = np.load(gmm_parameters, allow_pickle=True).item()
     print(f"Loading GMM parameters from {gmm_parameters}")
 
-    if model_type == "FastFlow":
-        model = fastflow.FastFlow(
-            backbone_name=config["backbone_name"],
-            flow_steps=config["flow_step"],
-            input_size=config["input_size"],
-            conv3x3_only=config["conv3x3_only"],
-            hidden_ratio=config["hidden_ratio"],
-            gmm_values=gmm_values,
-            in_channels=1 if args.use_fourier == 1 else 3,
-            backbone_weights=args.backbone_weights if hasattr(args, 'backbone_weights') and args.backbone_weights else None,
-            out_indices=out_indices,
-            pooling_type=pooling_type,
-            use_adversarial=args.use_adversarial == 1 if hasattr(args, 'use_adversarial') else False,
-            noise_differentiable=args.noise_differentiable == 1 if hasattr(args, 'noise_differentiable') else False,
-            use_proj_layer=args.use_proj_layer == 1 if hasattr(args, 'use_proj_layer') else False,
-            proj_hidden_ratio=args.proj_hidden_ratio if hasattr(args, 'proj_hidden_ratio') else 0.5,
-            use_autoencoder=args.use_autoencoder == 1 if hasattr(args, 'use_autoencoder') else False,
-            ae_hidden_ratio=args.ae_hidden_ratio if hasattr(args, 'ae_hidden_ratio') else 0.5,
-        )
-        print(f"Model A.D. Param#: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
+    model = fastflow.FastFlow(
+        backbone_name=config["backbone_name"],
+        flow_steps=config["flow_step"],
+        input_size=config["input_size"],
+        conv3x3_only=config["conv3x3_only"],
+        hidden_ratio=config["hidden_ratio"],
+        gmm_values=gmm_values,
+        in_channels=1 if args.use_fourier == 1 else 3,
+        backbone_weights=args.backbone_weights if hasattr(args, 'backbone_weights') and args.backbone_weights else None,
+        out_indices=out_indices,
+        pooling_type=pooling_type,
+        use_adversarial=args.use_adversarial == 1 if hasattr(args, 'use_adversarial') else False,
+        noise_differentiable=args.noise_differentiable == 1 if hasattr(args, 'noise_differentiable') else False,
+        use_proj_layer=args.use_proj_layer == 1 if hasattr(args, 'use_proj_layer') else False,
+        proj_hidden_ratio=args.proj_hidden_ratio if hasattr(args, 'proj_hidden_ratio') else 0.5,
+        use_autoencoder=args.use_autoencoder == 1 if hasattr(args, 'use_autoencoder') else False,
+        ae_hidden_ratio=args.ae_hidden_ratio if hasattr(args, 'ae_hidden_ratio') else 0.5,
+    )
+    print(f"Model A.D. Param#: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     return model
 
 
@@ -277,7 +261,7 @@ def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx, y_t
         'roc': roc_auc_score(y_true_binary, y_pred_balanced),
     }
 
-def eval_once(dataloader, model, model_type="FastFlow", class2idx=None, threshold_info=None, std_weight=0.0):
+def eval_once(dataloader, model, class2idx=None, threshold_info=None):
     model.eval()
     labels_list = []
     preds_list = []
@@ -286,10 +270,8 @@ def eval_once(dataloader, model, model_type="FastFlow", class2idx=None, threshol
     for data, targets in dataloader:
         data, targets = data.to(device), targets.to(device)
         with torch.no_grad():
-            ret = model(data) if model_type == "FastFlow" else model(data, eval_mode=True)
-        # Combined anomaly score: loss + std_weight * z_std
-        score = ret["loss"].cpu() + std_weight * ret["z_std"].cpu()
-        preds_list.append(score)
+            ret = model(data)
+        preds_list.append(ret["loss"].cpu())
         labels_list.append(targets.cpu())
 
     preds_ = torch.cat(preds_list, dim=0).numpy()
@@ -346,10 +328,10 @@ def eval_once(dataloader, model, model_type="FastFlow", class2idx=None, threshol
     )
 
     aps, accs, rocs = [], [], []
-    aps_gan, accs_gan = [], []
-    aps_dmo, accs_dmo = [], []
-    aps_dmc, accs_dmc = [], []
-    aps_mix, accs_mix = [], []
+    aps_gan, accs_gan, rocs_gan = [], [], []
+    aps_dmo, accs_dmo, rocs_dmo = [], [], []
+    aps_dmc, accs_dmc, rocs_dmc = [], [], []
+    aps_mix, accs_mix, rocs_mix = [], [], []
 
     for result in results:
         if result is None:
@@ -365,13 +347,13 @@ def eval_once(dataloader, model, model_type="FastFlow", class2idx=None, threshol
         rocs.append(result['roc'])
 
         if cname in GANS:
-            aps_gan.append(result['ap']); accs_gan.append(result['accuracy'])
+            aps_gan.append(result['ap']); accs_gan.append(result['accuracy']); rocs_gan.append(result['roc'])
         if cname in DM_OPEN:
-            aps_dmo.append(result['ap']); accs_dmo.append(result['accuracy'])
+            aps_dmo.append(result['ap']); accs_dmo.append(result['accuracy']); rocs_dmo.append(result['roc'])
         if cname in DM_CLOSED:
-            aps_dmc.append(result['ap']); accs_dmc.append(result['accuracy'])
+            aps_dmc.append(result['ap']); accs_dmc.append(result['accuracy']); rocs_dmc.append(result['roc'])
         if cname in MIX_2CLASS:
-            aps_mix.append(result['ap']); accs_mix.append(result['accuracy'])
+            aps_mix.append(result['ap']); accs_mix.append(result['accuracy']); rocs_mix.append(result['roc'])
 
     print("=" * 30)
     print(f"Mean Accuracy : {np.mean(accs):.4f}")
@@ -379,13 +361,13 @@ def eval_once(dataloader, model, model_type="FastFlow", class2idx=None, threshol
     print(f"Mean ROC AUC  : {np.mean(rocs):.4f}")
     print("\n--- Results by family ---")
     if aps_gan:
-        print(f"  GANs     :  Acc={np.mean(accs_gan):.4f}  AP={np.mean(aps_gan):.4f}")
+        print(f"  GANs     :  Acc={np.mean(accs_gan):.4f}  AP={np.mean(aps_gan):.4f}  ROC={np.mean(rocs_gan):.4f}")
     if aps_dmo:
-        print(f"  DM-Open  :  Acc={np.mean(accs_dmo):.4f}  AP={np.mean(aps_dmo):.4f}")
+        print(f"  DM-Open  :  Acc={np.mean(accs_dmo):.4f}  AP={np.mean(aps_dmo):.4f}  ROC={np.mean(rocs_dmo):.4f}")
     if aps_dmc:
-        print(f"  DM-Closed:  Acc={np.mean(accs_dmc):.4f}  AP={np.mean(aps_dmc):.4f}")
+        print(f"  DM-Closed:  Acc={np.mean(accs_dmc):.4f}  AP={np.mean(aps_dmc):.4f}  ROC={np.mean(rocs_dmc):.4f}")
     if aps_mix:
-        print(f"  Mix      :  Acc={np.mean(accs_mix):.4f}  AP={np.mean(aps_mix):.4f}")
+        print(f"  Mix      :  Acc={np.mean(accs_mix):.4f}  AP={np.mean(aps_mix):.4f}  ROC={np.mean(rocs_mix):.4f}")
     print("=" * 30 + "\n")
 
 
@@ -393,16 +375,14 @@ def evaluate(args):
     config = yaml.safe_load(open(args.config, "r"))
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
 
-    model = build_model(config, args.model_type, args)
+    model = build_model(config, args)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.cuda()
 
     # ----------------------------------------------------------------
-    # Threshold: compute live on val set (same as main.py), unless an
-    # explicit --threshold_path override is given.
+    # Threshold: load from file if available, else compute on val set.
     # ----------------------------------------------------------------
     threshold_info = None
-    std_weight = args.std_weight  # default; overridden below if loaded from file
 
     if os.path.exists(args.threshold_path):
         # --- Load pre-computed thresholds from file ---
@@ -410,7 +390,7 @@ def evaluate(args):
         if threshold_path.endswith('.npz'):
             loaded = np.load(threshold_path, allow_pickle=True)
             threshold_info = {key: loaded[key] for key in loaded.files}
-            for scalar_key in ('threshold', 'l_threshold', 'u_threshold', 'mean', 'std', 'std_weight'):
+            for scalar_key in ('threshold', 'l_threshold', 'u_threshold', 'mean', 'std'):
                 if scalar_key in threshold_info and isinstance(threshold_info[scalar_key], np.ndarray):
                     if threshold_info[scalar_key].size == 1:
                         threshold_info[scalar_key] = float(threshold_info[scalar_key])
@@ -425,24 +405,17 @@ def evaluate(args):
                     'l_threshold': float(threshold_data[0]) - 3 * float(threshold_data[1]),
                     'u_threshold': float(threshold_data[0]) + 3 * float(threshold_data[1]),
                 }
-        # Prefer std_weight stored in the file over the CLI value
-        std_weight = float(threshold_info.get('std_weight', args.std_weight))
-        print(f"Threshold loaded from {threshold_path}  (std_weight={std_weight})")
+        print(f"Threshold loaded from {threshold_path}")
     else:
-        # --- Primary path: compute on validation set ---
+        # --- Compute on validation set ---
         print("Computing threshold on validation set...")
         val_dataloader = build_val_data_loader(args, config)
         threshold_info = compute_threshold(
             val_dataloader, model,
-            model_type=args.model_type,
             use_lof=args.use_lof == 1,
             contamination=args.contamination,
-            use_percentile=args.use_percentile == 1,
-            percentile=args.percentile,
             alpha=args.alpha,
-            std_weight=args.std_weight,
         )
-        std_weight = args.std_weight
 
     # --- LOF: load from file if available ---
     lof_checkpoint = args.lof_checkpoint
@@ -489,8 +462,8 @@ def evaluate(args):
         else:
             test_dataloader, class2idx = create_dataloader_w_celeba(args, config, opt)
 
-        eval_once(test_dataloader, model, model_type=args.model_type,
-                  class2idx=class2idx, threshold_info=threshold_info, std_weight=std_weight)
+        eval_once(test_dataloader, model,
+                  class2idx=class2idx, threshold_info=threshold_info)
 
 
 if __name__ == "__main__":
