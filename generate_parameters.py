@@ -25,104 +25,128 @@ parser.add_argument('--use_fourier', action='store_true', help='Use Fourier magn
 args = parser.parse_args()
 
 # === Hyperparameters ===
-model_name = args.model_name
-reals = args.reals
+model_name  = args.model_name
+reals       = args.reals
 use_fourier = args.use_fourier
 
-config_path = f"{const.WORKING_DIR}/configs/{model_name}.yaml" 
+if use_fourier and model_name in (const.DINO_BACKBONES + const.CLIP_BACKBONES):
+    raise ValueError("use_fourier is not supported for DINOv2 / CLIP backbones (they require 3-channel RGB input).")
+
+config_path = f"{const.WORKING_DIR}/configs/{model_name}.yaml"
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 print(f"Use Fourier: {use_fourier}")
 print(f"Reals dataset: {reals}")
 
 # === Model Setup ===
-out_indices = config.get("out_indices", [1, 2, 3])  # Get from config or default
+out_indices  = config.get("out_indices", [1, 2, 3])
+pooling_type = config.get("pooling_type", "mean")
+n_components = config.get("gmm_n_components", 1)
 print(f"Using out_indices: {out_indices}")
-
-pooling_type = config.get("pooling_type", "mean")  # Get from config or default
 print(f"Using pooling_type: {pooling_type}")
-
-n_components = config.get("gmm_n_components", 1)  # Get from config or default
 print(f"Number of GMM components: {n_components}")
 
-if config['backbone_name'] in [const.BACKBONE_CAIT, const.BACKBONE_DEIT]:
+# ── Build feature extractor ───────────────────────────────────────────────────
+if model_name in [const.BACKBONE_CAIT, const.BACKBONE_DEIT]:
     model = timm.create_model(config['backbone_name'], pretrained=True, in_chans=3)
-    channels = [768]
-    scales = [16]
+    channels   = [768]
+    scales     = [16]
+    backbone_type = 'cait_deit'
+elif model_name in const.DINO_BACKBONES:
+    timm_name  = const.DINO_TIMM_NAMES[model_name]
+    model      = timm.create_model(timm_name, pretrained=True,
+                                   img_size=config['input_size'])
+    ch         = const.DINO_CHANNELS[model_name]
+    ps         = const.DINO_PATCH_SIZE[model_name]
+    channels   = [ch] * len(out_indices)
+    scales     = [ps] * len(out_indices)
+    backbone_type = 'dino'
+elif model_name in const.CLIP_BACKBONES:
+    from muflow.model import CLIPVisualExtractor
+    model      = CLIPVisualExtractor(model_name, out_block_indices=out_indices)
+    ch         = const.CLIP_CHANNELS[model_name]
+    ps         = const.CLIP_PATCH_SIZE[model_name]
+    channels   = [ch] * len(out_indices)
+    scales     = [ps] * len(out_indices)
+    backbone_type = 'clip'
 else:
-    model = timm.create_model(config['backbone_name'], pretrained=True, features_only=True, in_chans=3, out_indices=out_indices)
-    channels = model.feature_info.channels()
-    scales = model.feature_info.reduction()
+    model = timm.create_model(config['backbone_name'], pretrained=True,
+                               features_only=True, in_chans=3, out_indices=out_indices)
+    channels   = model.feature_info.channels()
+    scales     = model.feature_info.reduction()
+    backbone_type = 'cnn'
 
 model.eval()
 
-
 print("Channels: ", channels)
-print("Scales: ", scales)
+print("Scales:   ", scales)
 num_layers = len(out_indices)
 print(f"Number of layers: {num_layers}")
+
+def _imagenet_normalize(img_t):
+    """Apply ImageNet normalisation to a (1,3,H,W) float tensor in [0,255]."""
+    img_t = img_t / 255.0
+    mean  = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std   = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    return (img_t - mean) / std
 
 # === Get features ===
 def get_features(img, apply_normalization=False):
     """
     Extract features from an image array.
-    
+
     Args:
-        img: Image as numpy array (RGB uint8 [0-255] or Fourier float32 [0-1])
-        apply_normalization: If True, apply ImageNet normalization (for RGB images)
-    
+        img: numpy array (RGB uint8 or Fourier float32)
+        apply_normalization: if True normalise with ImageNet stats (RGB only)
     Returns:
-        features: Extracted features from the model
+        list of feature tensors (one per layer / block)
     """
-    # Convert to tensor: [H, W, C] -> [1, C, H, W]
-    img = torch.from_numpy(np.array(img)).permute(2, 0, 1).unsqueeze(0).float()
-    
-    # If applying normalization, this is RGB (uint8) - normalize to [0,1] and apply ImageNet stats
+    img_t = torch.from_numpy(np.array(img)).permute(2, 0, 1).unsqueeze(0).float()
+
     if apply_normalization:
-        # Normalize to [0, 1] range
-        img = img / 255.0
-        
-        # Apply ImageNet normalization (identical to torchvision.transforms.Normalize)
-        # Uses same dtype and device as the tensor, as per torchvision implementation
-        mean = torch.as_tensor([0.485, 0.456, 0.406], dtype=img.dtype, device=img.device)
-        std = torch.as_tensor([0.229, 0.224, 0.225], dtype=img.dtype, device=img.device)
-        mean = mean.view(-1, 1, 1)
-        std = std.view(-1, 1, 1)
-        img = img.sub(mean).div(std)
-    # else: Fourier magnitude is already in [0, 1] range, no normalization needed
-    
+        img_t = _imagenet_normalize(img_t)
+
     with torch.no_grad():
-        if isinstance(model, timm.models.vision_transformer.VisionTransformer):
-            x = model.patch_embed(img)
-            cls_token = model.cls_token.expand(x.shape[0], -1, -1)
-            if model.dist_token is None:
-                x = torch.cat((cls_token, x), dim=1)
-            else:
-                x = torch.cat((cls_token, model.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
-            x = model.pos_drop(x + model.pos_embed)
-            for i in range(8):  # paper Table 6. Block Index = 7
-                x = model.blocks[i](x)
-            x = model.norm(x)
-            x = x[:, 2:, :]
-            N, _, C = x.shape
-            x = x.permute(0, 2, 1)
-            x = x.reshape(N, C, config['input_size'] // 16, config['input_size'] // 16)
-            features = x
-        elif isinstance(model, timm.models.cait.Cait):
-            x = model.patch_embed(img)
+        if backbone_type == 'cait_deit':
+            if isinstance(model, timm.models.vision_transformer.VisionTransformer):
+                x = model.patch_embed(img_t)
+                cls_token = model.cls_token.expand(x.shape[0], -1, -1)
+                if model.dist_token is None:
+                    x = torch.cat((cls_token, x), dim=1)
+                else:
+                    x = torch.cat((cls_token, model.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
+                x = model.pos_drop(x + model.pos_embed)
+                for i in range(8):
+                    x = model.blocks[i](x)
+                x = model.norm(x)
+                x = x[:, 2:, :]
+                N, _, C = x.shape
+                x = x.permute(0, 2, 1)
+                x = x.reshape(N, C, config['input_size'] // 16, config['input_size'] // 16)
+                return [x]
+            else:  # CaiT
+                x = model.patch_embed(img_t)
+                x = x + model.pos_embed
+                x = model.pos_drop(x)
+                for i in range(41):
+                    x = model.blocks[i](x)
+                N, _, C = x.shape
+                x = model.norm(x)
+                x = x.permute(0, 2, 1)
+                x = x.reshape(N, C, config['input_size'] // 16, config['input_size'] // 16)
+                return [x]
+        elif backbone_type == 'dino':
+            # get_intermediate_layers returns list of (B,C,H,W) with reshape=True
+            return model.get_intermediate_layers(
+                img_t, n=list(out_indices), reshape=True
+            )
+        elif backbone_type == 'clip':
+            # CLIPVisualExtractor expects ImageNet-normalised input
+            # and handles its own renormlisation internally
+            return model(img_t)
+        else:  # cnn
+            return model(img_t)
             x = x + model.pos_embed
-            x = model.pos_drop(x)
-            for i in range(41):  # paper Table 6. Block Index = 40
-                x = model.blocks[i](x)
-            N, _, C = x.shape
-            x = x.permute(0, 2, 1)
-            x = x.reshape(N, C, config['input_size'] // 16, config['input_size'] // 16)
-            features = x
-        else:
-            features = model(img)
-    return features
-
-
 def get_features_from_path(path, apply_fourier=False): 
     """
     Load image from path and extract features.

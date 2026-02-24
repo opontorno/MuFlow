@@ -1,0 +1,12 @@
+# DINOv2 ViT-S/14  —  pretrained on LVD-142M (timm: vit_small_patch14_dinov2.lvd142m)
+# input_size must be a multiple of patch_size=14 → 224 (14×16)
+# out_indices here denotes transformer block indices (0-indexed, 12 blocks total)
+
+input_size: 224
+backbone_name: dinov2_vits14
+flow_step: 8
+hidden_ratio: 1.0
+conv3x3_only: True
+pooling_type: mean
+gmm_n_components: 1
+out_indices: [9, 10, 11]

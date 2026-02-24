@@ -13,6 +13,8 @@ from sklearn.manifold import TSNE
 from sklearn.mixture import GaussianMixture
 from muflow.fourier_utils import calculate_fourier_magnitude_rgb
 
+from muflow import constants as const
+
 # Enable loading of truncated images
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
@@ -26,8 +28,18 @@ print("Model config: ", config)
 out_indices = config.get("out_indices", [1, 2, 3])  # Get from config or default
 print(f"Using out_indices: {out_indices}")
 
-model = timm.create_model(model_name, pretrained=True, features_only=True, in_chans=3, out_indices=out_indices)
-model.eval()
+# Fourier-domain analysis is only meaningful for CNN backbones (3-channel RGB input).
+if model_name in const.DINO_BACKBONES + const.CLIP_BACKBONES:
+    raise ValueError(
+        f"analysis_WILD_fourier.py does not support DINO/CLIP backbones "
+        f"(backbone='{model_name}'). Use analysis_WILD.py instead."
+    )
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+model = timm.create_model(model_name, pretrained=True, features_only=True,
+                          in_chans=3, out_indices=out_indices)
+model.eval().to(DEVICE)
 
 channels = model.feature_info.channels()
 print("Channels: ", channels)
@@ -42,8 +54,9 @@ os.makedirs('.pictures', exist_ok=True)
 
 # === Helper Functions ===
 def get_features(img):
-    """Extract features from an image array."""
+    """Extract features from a Fourier-transformed image array."""
     img = torch.from_numpy(np.array(img)).permute(2, 0, 1).unsqueeze(0).float()
+    img = img.to(DEVICE)
     with torch.no_grad():
         features = model(img)
     return features

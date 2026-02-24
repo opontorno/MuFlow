@@ -12,30 +12,56 @@ from PIL import Image, ImageFile
 from sklearn.manifold import TSNE
 from sklearn.mixture import GaussianMixture
 
+from muflow import constants as const
+
 # Enable loading of truncated images
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # === Hyperparameters ===
-model_name = "resnet50"
-config_path = f"configs/{model_name}.yaml"
+model_name = "clip_vitb16"  # Change this to your desired backbone
+config_path = f"../configs/{model_name}.yaml"
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
 
 # === Model Setup ===
-out_indices = config.get("out_indices", [1, 2, 3])  # Get from config or default
-print(f"Using out_indices: {out_indices}")
-
-pooling_type = config.get("pooling_type", "mean")  # Get from config or default
+out_indices  = config.get("out_indices", [1, 2, 3])
+pooling_type = config.get("pooling_type", "mean")
+print(f"Using out_indices : {out_indices}")
 print(f"Using pooling_type: {pooling_type}")
 
-model = timm.create_model(model_name, pretrained=True, features_only=True, in_chans=3, out_indices=out_indices)
-model.eval()
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-channels = model.feature_info.channels()
-print("Channels: ", channels)
-scales = model.feature_info.reduction()
-print("Scales: ", scales)
+if model_name in const.DINO_BACKBONES:
+    timm_name    = const.DINO_TIMM_NAMES[model_name]
+    model        = timm.create_model(timm_name, pretrained=True,
+                                     img_size=config['input_size'])
+    channels     = [const.DINO_CHANNELS[model_name]] * len(out_indices)
+    scales       = [const.DINO_PATCH_SIZE[model_name]] * len(out_indices)
+    backbone_type = 'dino'
+elif model_name in const.CLIP_BACKBONES:
+    from muflow.model import CLIPVisualExtractor
+    model        = CLIPVisualExtractor(model_name, out_block_indices=out_indices)
+    channels     = [const.CLIP_CHANNELS[model_name]] * len(out_indices)
+    scales       = [const.CLIP_PATCH_SIZE[model_name]] * len(out_indices)
+    backbone_type = 'clip'
+elif model_name in [const.BACKBONE_CAIT, const.BACKBONE_DEIT]:
+    model        = timm.create_model(model_name, pretrained=True, in_chans=3)
+    channels     = [768]
+    scales       = [16]
+    backbone_type = 'cait_deit'
+else:
+    model        = timm.create_model(model_name, pretrained=True,
+                                     features_only=True, out_indices=out_indices,
+                                     in_chans=3)
+    channels     = model.feature_info.channels()
+    scales       = model.feature_info.reduction()
+    backbone_type = 'cnn'
+
+model.eval().to(DEVICE)
 num_layers = len(out_indices)
+print(f"Backbone type  : {backbone_type}")
+print(f"Channels/layer : {channels}")
+print(f"Scales/layer   : {scales}")
 print(f"Number of layers: {num_layers}")
 
 # Create output directory for plots
@@ -43,17 +69,34 @@ os.makedirs('.pictures', exist_ok=True)
 
 
 # === Helper Functions ===
+_imagenet_mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+_imagenet_std  = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+
+
 def get_features(img):
-    """Extract features from an image array."""
-    img = torch.from_numpy(np.array(img)).permute(2, 0, 1).unsqueeze(0).float()
+    """Extract features from a (H, W, 3) uint8/float numpy array.
+
+    Applies ImageNet normalisation before forwarding.
+    CLIPVisualExtractor handles its own renormalisation internally.
+    """
+    t = torch.from_numpy(np.array(img)).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+    t = (t - _imagenet_mean) / _imagenet_std
+    t = t.to(DEVICE)
     with torch.no_grad():
-        features = model(img)
+        if backbone_type == 'dino':
+            features = model.get_intermediate_layers(t, n=list(out_indices), reshape=True)
+        elif backbone_type in ('clip', 'cnn'):
+            features = model(t)
+        else:  # cait_deit
+            features = [model(t)]
     return features
 
 
-def get_features_from_path(path): 
+def get_features_from_path(path):
     """Load image from path and extract features."""
-    img = np.array(Image.open(path).convert("RGB").resize([config['input_size'], config['input_size']]))
+    img = np.array(Image.open(path).convert("RGB").resize(
+        [config['input_size'], config['input_size']], Image.BILINEAR
+    ))
     return get_features(img)
 
 
@@ -223,7 +266,7 @@ def plot_tsne_analysis(features_by_class, colors_dict, save_prefix, num_layers=N
         plt.grid(True, linestyle='--', alpha=0.6)
         plt.tight_layout()
         
-        save_path = f'.pictures/{save_prefix}_layer_{layer_idx}.png'
+        save_path = f'.pictures/{save_prefix}_{pooling_type}_layer_{layer_idx}.png'
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.show()
         print(f"Saved to {save_path}")

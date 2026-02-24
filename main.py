@@ -38,7 +38,6 @@ def parse_args():
     parser.add_argument('--use_augs', type=int, default=0, choices=[0, 1], help="Whether to use data augmentation")
     parser.add_argument('--use_fourier', type=int, default=0, choices=[0, 1], help="Whether to use Fourier transform")
     parser.add_argument('--run_name', type=str)
-    parser.add_argument('--model_type', type=str, choices=['FastFlow', 'VAE'], default='FastFlow', help="Choose the model to train")
     parser.add_argument('--eval_interval', type=int, default=1)
     parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
     parser.add_argument('--log_interval', type=int, default=10)
@@ -87,6 +86,9 @@ def parse_args():
     parser.add_argument('--ae_training_mode', type=str, default='two_phase', choices=['two_phase', 'end_to_end'],
                         help="AE training strategy: 'two_phase' alternates AE/NF phases per epoch; "
                              "'end_to_end' trains AE+NF jointly with a single optimizer")
+
+    # Latent-std scoring — helps detect StyleGAN / in-distribution fakes whose latents are hyper-concentrated
+    # (removed: per-sample z_std was not validated empirically)
 
     parser.add_argument('-patience', '--early_stopping_patience', type=float, default=float("inf"), help="Patience epochs for early stopping based on Val Acc")
 
@@ -208,7 +210,7 @@ def build_pair_data_loader(args, config):
     return dataloader
 
 
-def build_model(config, model_type, args):
+def build_model(config, args):
     out_indices = config.get("out_indices", [1, 2, 3])
     out_indices_str = str(out_indices)
     pooling_type = config.get("pooling_type", "mean")
@@ -232,36 +234,33 @@ def build_model(config, model_type, args):
         'noise_differentiable': args.noise_differentiable == 1,
     } if hasattr(args, 'use_adversarial') else {'use_adversarial': False, 'noise_differentiable': False}
 
-    if model_type == "FastFlow":
-        model = fastflow.FastFlow(
-            backbone_name=config["backbone_name"],
-            flow_steps=config["flow_step"],
-            input_size=config["input_size"],
-            conv3x3_only=config["conv3x3_only"],
-            hidden_ratio=config["hidden_ratio"],
-            gmm_values=gmm_values,
-            in_channels=1 if args.use_fourier == 1 else 3,
-            backbone_weights=args.backbone_weights,
-            out_indices=config.get("out_indices", [1, 2, 3]),
-            pooling_type=pooling_type,
-            use_adversarial=adversarial_config['use_adversarial'],
-            noise_differentiable=adversarial_config['noise_differentiable'],
-            use_proj_layer=args.use_proj_layer == 1 if hasattr(args, 'use_proj_layer') else False,
-            proj_hidden_ratio=args.proj_hidden_ratio if hasattr(args, 'proj_hidden_ratio') else 0.5,
-            use_autoencoder=args.use_autoencoder == 1 if hasattr(args, 'use_autoencoder') else False,
-            ae_hidden_ratio=args.ae_hidden_ratio if hasattr(args, 'ae_hidden_ratio') else 0.5,
+    model = fastflow.FastFlow(
+        backbone_name=config["backbone_name"],
+        flow_steps=config["flow_step"],
+        input_size=config["input_size"],
+        conv3x3_only=config["conv3x3_only"],
+        hidden_ratio=config["hidden_ratio"],
+        gmm_values=gmm_values,
+        in_channels=1 if args.use_fourier == 1 else 3,
+        backbone_weights=args.backbone_weights,
+        out_indices=config.get("out_indices", [1, 2, 3]),
+        pooling_type=pooling_type,
+        use_adversarial=adversarial_config['use_adversarial'],
+        noise_differentiable=adversarial_config['noise_differentiable'],
+        use_proj_layer=args.use_proj_layer == 1 if hasattr(args, 'use_proj_layer') else False,
+        proj_hidden_ratio=args.proj_hidden_ratio if hasattr(args, 'proj_hidden_ratio') else 0.5,
+        use_autoencoder=args.use_autoencoder == 1 if hasattr(args, 'use_autoencoder') else False,
+        ae_hidden_ratio=args.ae_hidden_ratio if hasattr(args, 'ae_hidden_ratio') else 0.5,
+    )
+    print(
+        "Model A.D. Param#: {}".format(
+            sum(p.numel() for p in model.parameters() if p.requires_grad)
         )
-        print(
-            "Model A.D. Param#: {}".format(
-                sum(p.numel() for p in model.parameters() if p.requires_grad)
-            )
-        )
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
+    )
     return model
 
 
-def build_optimizer(args, model, model_type, config):
+def build_optimizer(args, model, config):
     """
     Build optimizer(s) for the model.
 
@@ -270,93 +269,88 @@ def build_optimizer(args, model, model_type, config):
         use_proj_layer=1  : tuple (optimizer_proj, optimizer_fastflow)
         use_autoencoder=1 : tuple (optimizer_ae, optimizer_fastflow)
     """
-    if model_type == "FastFlow":
-        use_proj = hasattr(args, 'use_proj_layer') and args.use_proj_layer == 1
-        use_ae = hasattr(args, 'use_autoencoder') and args.use_autoencoder == 1
+    use_proj = hasattr(args, 'use_proj_layer') and args.use_proj_layer == 1
+    use_ae = hasattr(args, 'use_autoencoder') and args.use_autoencoder == 1
 
-        # ---- Autoencoder branch ----
-        if use_ae and model.autoencoders is not None:
-            ae_mode = getattr(args, 'ae_training_mode', 'two_phase')
+    # ---- Autoencoder branch ----
+    if use_ae and model.autoencoders is not None:
+        ae_mode = getattr(args, 'ae_training_mode', 'two_phase')
 
-            if ae_mode == 'end_to_end':
-                # Single optimizer: AE + NF flows trained jointly
-                joint_params = list(model.autoencoders.parameters()) + list(model.nf_flows.parameters())
-                if args.optimizer == "AdamW":
-                    return torch.optim.AdamW(joint_params, lr=args.lr, weight_decay=args.weight_decay)
-                elif args.optimizer == "sgd":
-                    return torch.optim.SGD(joint_params, lr=args.lr, weight_decay=args.weight_decay, momentum=0.9)
-                else:
-                    raise ValueError(f"Unknown optimizer: {args.optimizer}")
-            else:
-                # two_phase: separate optimizers
-                if args.optimizer == "AdamW":
-                    optimizer_ae = torch.optim.AdamW(
-                        model.autoencoders.parameters(),
-                        lr=args.lr, weight_decay=args.weight_decay
-                    )
-                    optimizer_fastflow = torch.optim.AdamW(
-                        model.nf_flows.parameters(),
-                        lr=args.lr, weight_decay=args.weight_decay
-                    )
-                elif args.optimizer == "sgd":
-                    optimizer_ae = torch.optim.SGD(
-                        model.autoencoders.parameters(),
-                        lr=args.lr, weight_decay=args.weight_decay, momentum=0.9
-                    )
-                    optimizer_fastflow = torch.optim.SGD(
-                        model.nf_flows.parameters(),
-                        lr=args.lr, weight_decay=args.weight_decay, momentum=0.9
-                    )
-                else:
-                    raise ValueError(f"Unknown optimizer: {args.optimizer}")
-                return optimizer_ae, optimizer_fastflow
-
-        # ---- Projection-layer branch ----
-        if use_proj and model.projection_layers is not None:
-            # Create two separate optimizers for end-to-end training
+        if ae_mode == 'end_to_end':
+            # Single optimizer: AE + NF flows trained jointly
+            joint_params = list(model.autoencoders.parameters()) + list(model.nf_flows.parameters())
             if args.optimizer == "AdamW":
-                optimizer_proj = torch.optim.AdamW(
-                    model.projection_layers.parameters(), 
-                    lr=args.lr, 
-                    weight_decay=args.weight_decay
+                return torch.optim.AdamW(joint_params, lr=args.lr, weight_decay=args.weight_decay)
+            elif args.optimizer == "sgd":
+                return torch.optim.SGD(joint_params, lr=args.lr, weight_decay=args.weight_decay, momentum=0.9)
+            else:
+                raise ValueError(f"Unknown optimizer: {args.optimizer}")
+        else:
+            # two_phase: separate optimizers
+            if args.optimizer == "AdamW":
+                optimizer_ae = torch.optim.AdamW(
+                    model.autoencoders.parameters(),
+                    lr=args.lr, weight_decay=args.weight_decay
                 )
                 optimizer_fastflow = torch.optim.AdamW(
-                    model.nf_flows.parameters(), 
-                    lr=args.lr, 
-                    weight_decay=args.weight_decay
+                    model.nf_flows.parameters(),
+                    lr=args.lr, weight_decay=args.weight_decay
                 )
             elif args.optimizer == "sgd":
-                optimizer_proj = torch.optim.SGD(
-                    model.projection_layers.parameters(), 
-                    lr=args.lr, 
-                    weight_decay=args.weight_decay, 
-                    momentum=0.9
+                optimizer_ae = torch.optim.SGD(
+                    model.autoencoders.parameters(),
+                    lr=args.lr, weight_decay=args.weight_decay, momentum=0.9
                 )
                 optimizer_fastflow = torch.optim.SGD(
-                    model.nf_flows.parameters(), 
-                    lr=args.lr, 
-                    weight_decay=args.weight_decay, 
-                    momentum=0.9
+                    model.nf_flows.parameters(),
+                    lr=args.lr, weight_decay=args.weight_decay, momentum=0.9
                 )
             else:
                 raise ValueError(f"Unknown optimizer: {args.optimizer}")
-            
-            return optimizer_proj, optimizer_fastflow
-        
+            return optimizer_ae, optimizer_fastflow
+
+    # ---- Projection-layer branch ----
+    if use_proj and model.projection_layers is not None:
+        # Create two separate optimizers for end-to-end training
+        if args.optimizer == "AdamW":
+            optimizer_proj = torch.optim.AdamW(
+                model.projection_layers.parameters(),
+                lr=args.lr,
+                weight_decay=args.weight_decay
+            )
+            optimizer_fastflow = torch.optim.AdamW(
+                model.nf_flows.parameters(),
+                lr=args.lr,
+                weight_decay=args.weight_decay
+            )
+        elif args.optimizer == "sgd":
+            optimizer_proj = torch.optim.SGD(
+                model.projection_layers.parameters(),
+                lr=args.lr,
+                weight_decay=args.weight_decay,
+                momentum=0.9
+            )
+            optimizer_fastflow = torch.optim.SGD(
+                model.nf_flows.parameters(),
+                lr=args.lr,
+                weight_decay=args.weight_decay,
+                momentum=0.9
+            )
         else:
-            # Single optimizer for standard training
-            if args.optimizer == "AdamW":
-                return torch.optim.AdamW(
-                    model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-                )
-            elif args.optimizer == "sgd":
-                return torch.optim.SGD(
-                    model.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=0.9
-                )
-            else:
-                raise ValueError(f"Unknown optimizer: {args.optimizer}")
+            raise ValueError(f"Unknown optimizer: {args.optimizer}")
+        return optimizer_proj, optimizer_fastflow
+
+    # ---- Standard branch ----
+    if args.optimizer == "AdamW":
+        return torch.optim.AdamW(
+            model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+        )
+    elif args.optimizer == "sgd":
+        return torch.optim.SGD(
+            model.parameters(), lr=args.lr, weight_decay=args.weight_decay, momentum=0.9
+        )
     else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        raise ValueError(f"Unknown optimizer: {args.optimizer}")
 
 
 def train_autoencoder_one_epoch(dataloader, model, optimizer_ae, epoch, args):
@@ -390,35 +384,45 @@ def train_autoencoder_one_epoch(dataloader, model, optimizer_ae, epoch, args):
 
         with torch.no_grad():
             # ---- Extract and normalise backbone features (frozen) ----
-            if isinstance(model.feature_extractor, timm.models.vision_transformer.VisionTransformer):
-                x = model.feature_extractor.patch_embed(data)
-                cls_token = model.feature_extractor.cls_token.expand(x.shape[0], -1, -1)
-                if model.feature_extractor.dist_token is None:
-                    x = torch.cat((cls_token, x), dim=1)
-                else:
-                    x = torch.cat((cls_token,
-                                   model.feature_extractor.dist_token.expand(x.shape[0], -1, -1),
-                                   x), dim=1)
-                x = model.feature_extractor.pos_drop(x + model.feature_extractor.pos_embed)
-                for i in range(8):
-                    x = model.feature_extractor.blocks[i](x)
-                x = model.feature_extractor.norm(x)
-                x = x[:, 2:, :]
-                N, _, C = x.shape
-                x = x.permute(0, 2, 1)
-                x = x.reshape(N, C, model.input_size // 16, model.input_size // 16)
-                features = [x]
-            elif isinstance(model.feature_extractor, timm.models.cait.Cait):
-                x = model.feature_extractor.patch_embed(data)
-                x = x + model.feature_extractor.pos_embed
-                x = model.feature_extractor.pos_drop(x)
-                for i in range(41):
-                    x = model.feature_extractor.blocks[i](x)
-                N, _, C = x.shape
-                x = model.feature_extractor.norm(x)
-                x = x.permute(0, 2, 1)
-                x = x.reshape(N, C, model.input_size // 16, model.input_size // 16)
-                features = [x]
+            bt = model.backbone_type
+            if bt == 'cait_deit':
+                if isinstance(model.feature_extractor, timm.models.vision_transformer.VisionTransformer):
+                    x = model.feature_extractor.patch_embed(data)
+                    cls_token = model.feature_extractor.cls_token.expand(x.shape[0], -1, -1)
+                    if model.feature_extractor.dist_token is None:
+                        x = torch.cat((cls_token, x), dim=1)
+                    else:
+                        x = torch.cat((cls_token,
+                                       model.feature_extractor.dist_token.expand(x.shape[0], -1, -1),
+                                       x), dim=1)
+                    x = model.feature_extractor.pos_drop(x + model.feature_extractor.pos_embed)
+                    for i in range(8):
+                        x = model.feature_extractor.blocks[i](x)
+                    x = model.feature_extractor.norm(x)
+                    x = x[:, 2:, :]
+                    N, _, C = x.shape
+                    x = x.permute(0, 2, 1)
+                    x = x.reshape(N, C, model.input_size // 16, model.input_size // 16)
+                    features = [x]
+                else:  # CaiT
+                    x = model.feature_extractor.patch_embed(data)
+                    x = x + model.feature_extractor.pos_embed
+                    x = model.feature_extractor.pos_drop(x)
+                    for i in range(41):
+                        x = model.feature_extractor.blocks[i](x)
+                    N, _, C = x.shape
+                    x = model.feature_extractor.norm(x)
+                    x = x.permute(0, 2, 1)
+                    x = x.reshape(N, C, model.input_size // 16, model.input_size // 16)
+                    features = [x]
+            elif bt == 'dino':
+                features = model.feature_extractor.get_intermediate_layers(
+                    data, n=model.dino_out_blocks, reshape=True
+                )
+                features = [model.norms[i](f) for i, f in enumerate(features)]
+            elif bt == 'clip':
+                features = model.feature_extractor(data)
+                features = [model.norms[i](f) for i, f in enumerate(features)]
             else:
                 features = model.feature_extractor(data)
                 features = [model.norms[i](feat) for i, feat in enumerate(features)]
@@ -519,19 +523,26 @@ def train_projection_one_epoch(dataloader_pair, model, optimizer_proj, epoch, ar
         
         # Extract features (frozen feature extractor)
         with torch.no_grad():
-            # For transformers and other special backbones
-            if isinstance(model.feature_extractor, timm.models.vision_transformer.VisionTransformer):
+            bt = model.backbone_type
+            if bt == 'dino':
+                features1 = model.feature_extractor.get_intermediate_layers(
+                    img1, n=model.dino_out_blocks, reshape=True)
+                features1 = [model.norms[i](f) for i, f in enumerate(features1)]
+                features2 = model.feature_extractor.get_intermediate_layers(
+                    img2, n=model.dino_out_blocks, reshape=True)
+                features2 = [model.norms[i](f) for i, f in enumerate(features2)]
+            elif bt == 'clip':
                 features1 = model.feature_extractor(img1)
+                features1 = [model.norms[i](f) for i, f in enumerate(features1)]
                 features2 = model.feature_extractor(img2)
-                # Process transformer features...
-                features1 = [features1]
-                features2 = [features2]
-            elif isinstance(model.feature_extractor, timm.models.cait.Cait):
+                features2 = [model.norms[i](f) for i, f in enumerate(features2)]
+            elif bt == 'cait_deit':
+                # For legacy transformers just use standard forward (features already good)
                 features1 = model.feature_extractor(img1)
-                features2 = model.feature_extractor(img2)
                 features1 = [features1]
+                features2 = model.feature_extractor(img2)
                 features2 = [features2]
-            else:
+            else:  # cnn
                 features1 = model.feature_extractor(img1)
                 features1 = [model.norms[i](feat) for i, feat in enumerate(features1)]
                 features2 = model.feature_extractor(img2)
@@ -724,14 +735,13 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None, a
     return train_mean, train_std, preds_train
 
 
-def compute_threshold(val_dataloader, model, model_type="FastFlow", use_lof=False, contamination='auto', use_percentile=False, percentile=95, alpha=0.1):
+def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto', use_percentile=False, percentile=95, alpha=0.1):
     """
     Compute threshold for anomaly detection using validation set.
     
     Args:
         val_dataloader: DataLoader for validation set
         model: Trained model
-        model_type: Type of model (default: "FastFlow")
         use_lof: If True, use LOF instead of mean+3*std
         contamination: Contamination rate for LOF (default: 'auto')
         use_percentile: If True, use percentile instead of mean+3*std
@@ -755,16 +765,13 @@ def compute_threshold(val_dataloader, model, model_type="FastFlow", use_lof=Fals
         data = data.to(device)
 
         with torch.no_grad():
-            ret = model(data) if model_type == "FastFlow" else model(data, eval_mode=True)
-            if model_type == "FastFlow":
-                # Move to CPU immediately to free GPU memory
-                outputs = ret["loss"].cpu()
-                loss_values.append(outputs)
+            ret = model(data)
+            # Move to CPU immediately to free GPU memory
+            loss_values.append(ret["loss"].cpu())
     
     if len(loss_values) == 0:
         raise ValueError("No validation loss values collected. Check validation dataloader.")
     
-    # Concatenate tensors directly instead of converting to numpy first
     losses = torch.cat(loss_values, dim=0).numpy()
     mean = losses.mean()
     std = losses.std()
@@ -774,14 +781,12 @@ def compute_threshold(val_dataloader, model, model_type="FastFlow", use_lof=Fals
         'threshold': None,
         'mean': mean,
         'std': std,
-        'losses': losses
+        'losses': losses,
     }
     
     if use_lof:
         lof = LocalOutlierFactor(novelty=True, contamination=contamination, n_jobs=-1)
         lof.fit(losses.reshape(-1, 1))
-        # For LOF, we use the threshold as the median of negative scores (outliers have negative scores)
-        # Or we can use a percentile of the scores
         result['lof'] = lof
     elif use_percentile:
         threshold = np.percentile(losses, percentile)
@@ -843,7 +848,7 @@ def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx, y_t
     }
 
 
-def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, threshold_info=None): 
+def eval_once(dataloader, model, epoch, class2idx=None, threshold_info=None): 
     inference_start_time = time.time()
     model.eval()
     labels_list = []
@@ -853,13 +858,9 @@ def eval_once(dataloader, model, epoch, model_type="FastFlow", class2idx=None, t
     for data, targets in dataloader:
         data, targets = data.to(device), targets.to(device)
         with torch.no_grad():
-            ret = model(data) if model_type == "FastFlow" else model(data, eval_mode=True)
-        
-        if model_type == "FastFlow":
-            # Move to CPU immediately to free GPU memory
-            outputs = ret["loss"].cpu()
-        
-        preds_list.append(outputs)
+            ret = model(data)
+        score = ret["loss"].cpu()
+        preds_list.append(score)
         labels_list.append(targets.cpu())
 
     inference_time = time.time() - inference_start_time
@@ -1095,7 +1096,7 @@ def train(args, config):
         mode="disabled" if args.debug else args.wandb)
     wandb.config.update(args)
 
-    model = build_model(config, args.model_type, args)
+    model = build_model(config, args)
     if args.checkpoint:
         checkpoint = torch.load(args.checkpoint)
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -1122,7 +1123,7 @@ def train(args, config):
     args.device = device
 
     # Build optimizer(s)
-    optimizer_result = build_optimizer(args, model, args.model_type, config)
+    optimizer_result = build_optimizer(args, model, config)
 
     # Handle cases: standard / proj / autoencoder (two_phase or end_to_end)
     ae_mode = getattr(args, 'ae_training_mode', 'two_phase')
@@ -1216,7 +1217,7 @@ def train(args, config):
         
         if (epoch + 1) % args.eval_interval == 0:
             # Compute threshold on validation set
-            threshold_info = compute_threshold(val_dataloader, model, args.model_type, use_lof=True if args.use_lof==1 else False, contamination=args.contamination, use_percentile=True if args.use_percentile==1 else False, percentile=args.percentile, alpha=args.alpha)
+            threshold_info = compute_threshold(val_dataloader, model, use_lof=True if args.use_lof==1 else False, contamination=args.contamination, use_percentile=True if args.use_percentile==1 else False, percentile=args.percentile, alpha=args.alpha)
             
             # Log validation threshold statistics
             l_threshold_val = threshold_info['l_threshold']
@@ -1240,7 +1241,7 @@ def train(args, config):
             wandb.log(log_dict, step=epoch + 1)
             
             # Evaluate on test set using threshold from validation
-            acc, preds, labels = eval_once(test_dataloader, model, epoch, args.model_type, class2idx, threshold_info)
+            acc, preds, labels = eval_once(test_dataloader, model, epoch, class2idx, threshold_info)
             current_acc = acc
             
             # Log test loss statistics (preds_ contains loss values from eval_once)
@@ -1274,20 +1275,22 @@ def train(args, config):
                     checkpoint_dict["optimizer_state_dict"] = optimizer.state_dict()
                 
                 torch.save(checkpoint_dict, checkpoint_path)
-                
+
+                # Save all run hyperparameters so eval.py can reload them
+                # without re-specifying every flag.
+                args_dict = vars(args).copy()
+                args_dict.pop('device', None)  # non-serializable torch.device
+                with open(os.path.join(checkpoint_dir, "run_config.yaml"), 'w') as f:
+                    yaml.dump(args_dict, f, default_flow_style=False)
+
                 # Save threshold information (only save fields that exist)
                 # Note: LOF object cannot be saved in npz, only with joblib
-                save_dict = {
-                    'l_threshold': threshold_info['l_threshold'],
-                    'u_threshold': threshold_info['u_threshold'],
-                    'losses': threshold_info['losses']
-                }
-                if 'mean' in threshold_info:
-                    save_dict['mean'] = threshold_info['mean']
-                if 'std' in threshold_info:
-                    save_dict['std'] = threshold_info['std']
-                if 'lof_scores' in threshold_info:
-                    save_dict['lof_scores'] = threshold_info['lof_scores']
+                save_dict = {}
+                for key in ('l_threshold', 'u_threshold', 'threshold',
+                            'losses', 'mean', 'std',
+                            'lof_scores'):
+                    if key in threshold_info and threshold_info[key] is not None:
+                        save_dict[key] = threshold_info[key]
                 
                 np.savez(
                     os.path.join(checkpoint_dir, "thresholds.npz"),
@@ -1325,14 +1328,14 @@ if __name__ == "__main__":
         if args.use_fourier == 1:
             args.run_name += "_fourier"
         args.run_name += f"_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}_ld{args.lr_decay}_lp{args.lr_patience}_{config['pooling_type']}"
-        
+
         if args.use_lof == 1:
             args.run_name += "_lof"
         if args.use_percentile == 1:
             args.run_name += f"_percentile{args.percentile}"
         if args.use_lof == 0 and args.use_percentile == 0:
             args.run_name += f"_t-alpha{args.alpha}"
-
+        
         if args.use_augs == 1:
             args.run_name += "_augs"
         

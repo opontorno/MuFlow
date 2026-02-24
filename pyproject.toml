@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "muflow"
+version = "0.1.0"
+description = "Normalizing Flow based deepfake detection"
+authors = [
+  { name="opontorno", email="orazio.pontono@phd.unict.it" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "timm>=0.9.0",
+    "open-clip-torch>=2.20.0",
+    "FrEIA @ git+https://github.com/VLL-HD/FrEIA@1779d1fba1e21000fda1927b59eeac0a6fcaa284",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "scikit-learn>=1.2.0",
+    "joblib>=1.2.0",
+    "Pillow>=9.0.0",
+    "pyyaml>=6.0",
+    "wandb>=0.15.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "pandas>=2.0.0",
+    "tqdm>=4.65.0",
+    "opencv-python>=4.7.0",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/muflow"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/muflow/",
+    "pyproject.toml",
+    "requirements.txt",
+    "README.md",
+]

@@ -11,6 +11,78 @@ from muflow.modules import ProjectionLayer, ConvAutoencoder
 import numpy as np
 
 
+class CLIPVisualExtractor(nn.Module):
+    """
+    Wraps an open_clip visual encoder and exposes a list of intermediate
+    spatial feature maps at user-specified transformer block indices.
+
+    The input tensor is expected to be ImageNet-normalised
+    (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]).  The extractor
+    internally undoes that and re-applies CLIP normalisation so that the
+    rest of the pipeline (dataset, transforms) remains unchanged.
+
+    Returns a list of (B, C, Hf, Wf) tensors, one per requested block.
+    """
+
+    def __init__(self, backbone_name: str, out_block_indices: list):
+        super().__init__()
+        try:
+            import open_clip
+        except ImportError:
+            raise ImportError(
+                "open_clip_torch is required for CLIP backbones. "
+                "Install with: pip install open-clip-torch"
+            )
+        clip_model_name, pretrained = const.CLIP_OPENCLIP_NAMES[backbone_name]
+        clip_model, _, _ = open_clip.create_model_and_transforms(
+            clip_model_name, pretrained=pretrained
+        )
+        self.visual           = clip_model.visual
+        self.out_block_indices= sorted(out_block_indices)
+        self.patch_size       = const.CLIP_PATCH_SIZE[backbone_name]
+        self.hidden_dim       = const.CLIP_CHANNELS[backbone_name]
+
+        # Buffers for renormalisation: ImageNet → CLIP colour stats
+        imagenet_mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        imagenet_std  = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+        clip_mean     = torch.tensor(const.CLIP_MEAN).view(1, 3, 1, 1)
+        clip_std      = torch.tensor(const.CLIP_STD ).view(1, 3, 1, 1)
+        self.register_buffer('imagenet_mean', imagenet_mean)
+        self.register_buffer('imagenet_std',  imagenet_std)
+        self.register_buffer('clip_mean',     clip_mean)
+        self.register_buffer('clip_std',      clip_std)
+
+    def forward(self, x: torch.Tensor) -> list:
+        # Undo ImageNet norm, apply CLIP norm
+        x = x * self.imagenet_std + self.imagenet_mean   # → [0,1]
+        x = (x - self.clip_mean) / self.clip_std
+
+        v = self.visual
+        B = x.shape[0]
+
+        # Patch embedding: (B, width, Hf, Wf)
+        x = v.conv1(x)
+        Hf, Wf = x.shape[2], x.shape[3]
+        x = x.reshape(B, x.shape[1], -1).permute(0, 2, 1)   # (B, N, C)
+
+        # CLS token + positional embedding
+        cls = v.class_embedding.to(x.dtype).unsqueeze(0).unsqueeze(0).expand(B, -1, -1)
+        x   = torch.cat([cls, x], dim=1)                     # (B, N+1, C)
+        x   = x + v.positional_embedding.to(x.dtype)
+        x   = v.ln_pre(x)
+        x   = x.permute(1, 0, 2)                             # (N+1, B, C)
+
+        features = []
+        for i, block in enumerate(v.transformer.resblocks):
+            x = block(x)
+            if i in self.out_block_indices:
+                # Strip CLS, reshape to spatial map
+                tokens = x[1:].permute(1, 2, 0)              # (B, C, N)
+                feat   = tokens.reshape(B, self.hidden_dim, Hf, Wf)
+                features.append(feat)
+        return features
+
+
 def gaussian_nll_loss(output, mu, cov, log_jac_det):
     
     B, d = output.shape
@@ -78,10 +150,47 @@ class FastFlow(nn.Module):
         ), "backbone_name must be one of {}".format(const.SUPPORTED_BACKBONES)
 
         if backbone_name in [const.BACKBONE_CAIT, const.BACKBONE_DEIT]:
+            # ── Legacy transformer backbones (DeiT / CaiT) ────────────────
+            self.backbone_type     = 'cait_deit'
             self.feature_extractor = timm.create_model(backbone_name, pretrained=True, in_chans=in_channels)
             channels = [768]
-            scales = [16]
+            scales   = [16]
+
+        elif backbone_name in const.DINO_BACKBONES:
+            # ── DINOv2 (timm) ──────────────────────────────────────────────
+            if in_channels != 3:
+                print(f"[WARNING] DINOv2 only supports in_channels=3; ignoring in_channels={in_channels}")
+            self.backbone_type  = 'dino'
+            timm_name           = const.DINO_TIMM_NAMES[backbone_name]
+            self.feature_extractor = timm.create_model(
+                timm_name, pretrained=True, img_size=input_size
+            )
+            # out_indices are used as transformer block indices to extract
+            self.dino_out_blocks = list(out_indices)
+            ch      = const.DINO_CHANNELS[backbone_name]
+            ps      = const.DINO_PATCH_SIZE[backbone_name]
+            num_out = len(out_indices)
+            channels = [ch] * num_out
+            scales   = [ps] * num_out
+
+        elif backbone_name in const.CLIP_BACKBONES:
+            # ── CLIP (open_clip) ───────────────────────────────────────────
+            if in_channels != 3:
+                print(f"[WARNING] CLIP only supports in_channels=3; ignoring in_channels={in_channels}")
+            self.backbone_type     = 'clip'
+            # out_indices are used as transformer block indices to extract
+            self.feature_extractor = CLIPVisualExtractor(
+                backbone_name, out_block_indices=list(out_indices)
+            )
+            ch      = const.CLIP_CHANNELS[backbone_name]
+            ps      = const.CLIP_PATCH_SIZE[backbone_name]
+            num_out = len(out_indices)
+            channels = [ch] * num_out
+            scales   = [ps] * num_out
+
         else:
+            # ── CNN backbones (ResNet, WideResNet, DenseNet …) ─────────────
+            self.backbone_type     = 'cnn'
             self.feature_extractor = timm.create_model(
                 backbone_name,
                 pretrained=True,
@@ -91,22 +200,24 @@ class FastFlow(nn.Module):
             )
             if backbone_weights is not None:
                 print(f"Loading backbone weights from {backbone_weights}")
-                backbone_weights = torch.load(backbone_weights)["model_state_dict"]
-                self.feature_extractor.load_state_dict(backbone_weights, strict=False)
+                bw = torch.load(backbone_weights)["model_state_dict"]
+                self.feature_extractor.load_state_dict(bw, strict=False)
                 print(f"Backbone weights loaded")
             channels = self.feature_extractor.feature_info.channels()
-            scales = self.feature_extractor.feature_info.reduction()
+            scales   = self.feature_extractor.feature_info.reduction()
 
-            # for transformers, use their pretrained norm w/o grad
-            # for resnets, self.norms are trainable LayerNorm
-            self.norms = nn.ModuleList()
-            for in_channels, scale in zip(channels, scales):
-                self.norms.append(
-                    nn.LayerNorm(
-                        [in_channels, int(input_size / scale), int(input_size / scale)],
-                        elementwise_affine=True,
-                    )
+        # ── Trainable LayerNorms (one per output scale) ────────────────────
+        # Applied after feature extraction for all backbone types.
+        # For cait_deit the norms are created but deliberately NOT used in
+        # forward() to preserve the pretrained ViT normalisation.
+        self.norms = nn.ModuleList()
+        for ch, sc in zip(channels, scales):
+            self.norms.append(
+                nn.LayerNorm(
+                    [ch, int(input_size / sc), int(input_size / sc)],
+                    elementwise_affine=True,
                 )
+            )
 
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
@@ -281,43 +392,59 @@ class FastFlow(nn.Module):
             If adversarial_mode='same_batch', returns loss_pure and loss_adv
         """
         self.feature_extractor.eval()
-        if isinstance(
-            self.feature_extractor, timm.models.vision_transformer.VisionTransformer
-        ):
-            x = self.feature_extractor.patch_embed(x)
-            cls_token = self.feature_extractor.cls_token.expand(x.shape[0], -1, -1)
-            if self.feature_extractor.dist_token is None:
-                x = torch.cat((cls_token, x), dim=1)
+
+        if self.backbone_type == 'cait_deit':
+            # ── DeiT ──────────────────────────────────────────────────────
+            if isinstance(self.feature_extractor, timm.models.vision_transformer.VisionTransformer):
+                x = self.feature_extractor.patch_embed(x)
+                cls_token = self.feature_extractor.cls_token.expand(x.shape[0], -1, -1)
+                if self.feature_extractor.dist_token is None:
+                    x = torch.cat((cls_token, x), dim=1)
+                else:
+                    x = torch.cat(
+                        (
+                            cls_token,
+                            self.feature_extractor.dist_token.expand(x.shape[0], -1, -1),
+                            x,
+                        ),
+                        dim=1,
+                    )
+                x = self.feature_extractor.pos_drop(x + self.feature_extractor.pos_embed)
+                for i in range(8):  # paper Table 6. Block Index = 7
+                    x = self.feature_extractor.blocks[i](x)
+                x = self.feature_extractor.norm(x)
+                x = x[:, 2:, :]
+                N, _, C = x.shape
+                x = x.permute(0, 2, 1)
+                x = x.reshape(N, C, self.input_size // 16, self.input_size // 16)
+                features = [x]
+            # ── CaiT ──────────────────────────────────────────────────────
             else:
-                x = torch.cat(
-                    (
-                        cls_token,
-                        self.feature_extractor.dist_token.expand(x.shape[0], -1, -1),
-                        x,
-                    ),
-                    dim=1,
-                )
-            x = self.feature_extractor.pos_drop(x + self.feature_extractor.pos_embed)
-            for i in range(8):  # paper Table 6. Block Index = 7
-                x = self.feature_extractor.blocks[i](x)
-            x = self.feature_extractor.norm(x)
-            x = x[:, 2:, :]
-            N, _, C = x.shape
-            x = x.permute(0, 2, 1)
-            x = x.reshape(N, C, self.input_size // 16, self.input_size // 16)
-            features = [x]
-        elif isinstance(self.feature_extractor, timm.models.cait.Cait):
-            x = self.feature_extractor.patch_embed(x)
-            x = x + self.feature_extractor.pos_embed
-            x = self.feature_extractor.pos_drop(x)
-            for i in range(41):  # paper Table 6. Block Index = 40
-                x = self.feature_extractor.blocks[i](x)
-            N, _, C = x.shape
-            x = self.feature_extractor.norm(x)
-            x = x.permute(0, 2, 1)
-            x = x.reshape(N, C, self.input_size // 16, self.input_size // 16)
-            features = [x]
+                x = self.feature_extractor.patch_embed(x)
+                x = x + self.feature_extractor.pos_embed
+                x = self.feature_extractor.pos_drop(x)
+                for i in range(41):  # paper Table 6. Block Index = 40
+                    x = self.feature_extractor.blocks[i](x)
+                N, _, C = x.shape
+                x = self.feature_extractor.norm(x)
+                x = x.permute(0, 2, 1)
+                x = x.reshape(N, C, self.input_size // 16, self.input_size // 16)
+                features = [x]
+
+        elif self.backbone_type == 'dino':
+            # ── DINOv2 — get_intermediate_layers returns (B, C, H, W) ────
+            features = self.feature_extractor.get_intermediate_layers(
+                x, n=self.dino_out_blocks, reshape=True
+            )
+            features = [self.norms[i](f) for i, f in enumerate(features)]
+
+        elif self.backbone_type == 'clip':
+            # ── CLIP — CLIPVisualExtractor handles renorm + spatial maps ─
+            features = self.feature_extractor(x)
+            features = [self.norms[i](f) for i, f in enumerate(features)]
+
         else:
+            # ── CNN (ResNet, etc.) ────────────────────────────────────────
             features = self.feature_extractor(x)
             features = [self.norms[i](feature) for i, feature in enumerate(features)]
         
