@@ -1,6 +1,8 @@
 import argparse
 from pprint import pprint
 import os, pdb
+import subprocess
+import sys
 import time
 import timm
 import torch.nn.functional as F
@@ -59,8 +61,6 @@ def parse_args():
     parser.add_argument('--alpha', type=float, default=0.01, help="Target false positive rate under the normality assumption, i.e., the probability of flagging a normal sample as anomalous.")
     parser.add_argument('--use_lof', type=int, default=0, choices=[0, 1], help="Whether to use LOF")
     parser.add_argument('--contamination', default='auto')
-    parser.add_argument('--use_percentile', type=int, default=0, choices=[0, 1], help="Whether to use percentile")
-    parser.add_argument('--percentile', type=int, default=95)
     
     # Projection Layer Hyperparameters
     parser.add_argument('-use_proj', '--use_proj_layer', type=int, default=0, choices=[0, 1], help="Whether to use projection layer with contrastive learning")
@@ -86,9 +86,6 @@ def parse_args():
     parser.add_argument('--ae_training_mode', type=str, default='two_phase', choices=['two_phase', 'end_to_end'],
                         help="AE training strategy: 'two_phase' alternates AE/NF phases per epoch; "
                              "'end_to_end' trains AE+NF jointly with a single optimizer")
-
-    # Latent-std scoring — helps detect StyleGAN / in-distribution fakes whose latents are hyper-concentrated
-    # (removed: per-sample z_std was not validated empirically)
 
     parser.add_argument('-patience', '--early_stopping_patience', type=float, default=float("inf"), help="Patience epochs for early stopping based on Val Acc")
 
@@ -221,9 +218,19 @@ def build_model(config, args):
     else:
         gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
     
-    # if not os.path.exists(gmm_parameters):
-    #     print(f"GMM parameters not found at {gmm_parameters}. Please run the parameter generation script first:")
-    #     !python generate_parameters.py --model_name {config['backbone_name']} --reals {args.reals} --use_fourier {args.use_fourier}
+    if not os.path.exists(gmm_parameters):
+        print(f"GMM parameters not found at {gmm_parameters}.")
+        print(f"Running generate_parameters.py...")
+        cmd = [
+            sys.executable,
+            os.path.join(const.WORKING_DIR, "generate_parameters.py"),
+            "--model_name", config["backbone_name"],
+            "--reals", args.reals,
+        ]
+        if args.use_fourier == 1:
+            cmd.append("--use_fourier")
+        subprocess.run(cmd, check=True)
+        print("GMM parameters generated successfully.")
 
     gmm_values = np.load(gmm_parameters, allow_pickle=True).item() 
     print(f"Loading gmm parameters from {gmm_parameters}")
@@ -735,17 +742,15 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None, a
     return train_mean, train_std, preds_train
 
 
-def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto', use_percentile=False, percentile=95, alpha=0.1):
+def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto', alpha=0.1):
     """
     Compute threshold for anomaly detection using validation set.
     
     Args:
         val_dataloader: DataLoader for validation set
         model: Trained model
-        use_lof: If True, use LOF instead of mean+3*std
+        use_lof: If True, use LOF instead of Gaussian threshold
         contamination: Contamination rate for LOF (default: 'auto')
-        use_percentile: If True, use percentile instead of mean+3*std
-        percentile: Percentile to use if use_percentile=True (default: 95)
         alpha: Target false positive rate under the normality assumption, i.e., the probability of flagging a normal sample as anomalous. (default: 0.1)
     Returns:
         dict with 'threshold' (scalar), 'mean', 'std', 'losses' (numpy array), 
@@ -788,9 +793,6 @@ def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto'
         lof = LocalOutlierFactor(novelty=True, contamination=contamination, n_jobs=-1)
         lof.fit(losses.reshape(-1, 1))
         result['lof'] = lof
-    elif use_percentile:
-        threshold = np.percentile(losses, percentile)
-        result['threshold'] = threshold
     else:
         z = norm.ppf(1 - alpha)
         l_threshold = mean - z * std
@@ -1217,7 +1219,7 @@ def train(args, config):
         
         if (epoch + 1) % args.eval_interval == 0:
             # Compute threshold on validation set
-            threshold_info = compute_threshold(val_dataloader, model, use_lof=True if args.use_lof==1 else False, contamination=args.contamination, use_percentile=True if args.use_percentile==1 else False, percentile=args.percentile, alpha=args.alpha)
+            threshold_info = compute_threshold(val_dataloader, model, use_lof=True if args.use_lof==1 else False, contamination=args.contamination, alpha=args.alpha)
             
             # Log validation threshold statistics
             l_threshold_val = threshold_info['l_threshold']
@@ -1331,9 +1333,7 @@ if __name__ == "__main__":
 
         if args.use_lof == 1:
             args.run_name += "_lof"
-        if args.use_percentile == 1:
-            args.run_name += f"_percentile{args.percentile}"
-        if args.use_lof == 0 and args.use_percentile == 0:
+        else:
             args.run_name += f"_t-alpha{args.alpha}"
         
         if args.use_augs == 1:
