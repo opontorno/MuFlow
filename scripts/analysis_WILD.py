@@ -18,7 +18,7 @@ from muflow import constants as const
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # === Hyperparameters ===
-model_name = "clip_vitb16"  # Change this to your desired backbone
+model_name = "resnet50"  # Change this to your desired backbone
 config_path = f"../configs/{model_name}.yaml"
 config = yaml.safe_load(open(config_path, "r"))
 print("Model config: ", config)
@@ -111,8 +111,12 @@ def calculate_fourier_spectrum(image):
 def build_generators_dict(patterns_dict):
     """Build a dictionary mapping generator names to lists of image paths."""
     return {
-        'Flux.1': glob(patterns_dict.get('Flux.1', '')),
         'ffhq': glob(patterns_dict.get('ffhq', '')),
+        'WDF Real': glob(patterns_dict.get('WDF Real', '')),
+        'celeba_hq': glob(patterns_dict.get('celeba_hq', '')),
+
+
+        'Flux.1': glob(patterns_dict.get('Flux.1', '')),
         'Stable DIffusion 3.5': glob(patterns_dict.get('Stable DIffusion 3.5', '')),
         'Starry AI': glob(patterns_dict.get('Starry AI', '')),
         'StyleGAN3': glob(patterns_dict.get('StyleGAN3', '')),
@@ -123,7 +127,6 @@ def build_generators_dict(patterns_dict):
         'Flux.1.1 Pro': glob(patterns_dict.get('Flux.1.1 Pro', '')),
         'Deep AI': glob(patterns_dict.get('Deep AI', '')),
         'StyleGAN2': glob(patterns_dict.get('StyleGAN2', '')),
-        'celeba_hq': glob(patterns_dict.get('celeba_hq', '')),
         'Hotpot AI': glob(patterns_dict.get('Hotpot AI', '')),
         'Tencent Hunyuan': glob(patterns_dict.get('Tencent Hunyuan', '')),
         'Dall-E 3': glob(patterns_dict.get('Dall-E 3', '')),
@@ -279,6 +282,7 @@ colors = {
 
     'ffhq': 'black',
     'celeba_hq': 'crimson',
+    'WDF Real': 'dimgray',
 
     'Stable DIffusion 3.5': 'lightseagreen',
     'Freepik': 'paleturquoise',
@@ -342,6 +346,7 @@ if os.path.exists(dfx_common_path):
 # Add real image datasets
 patterns['ffhq'] = '/media/orazio_mattia_group/ad4dd/ffhq/*/*.png'
 patterns['celeba_hq'] = '/media/orazio_mattia_group/ad4dd/celeba_hq/*/*/*.jpg'
+patterns['WDF Real'] = '/media/orazio_mattia_group/ad4dd/WildDeepfake/deepfake_in_the_wild/real_*/*/real/*/*.png'
 
 # Build generators dictionary
 generators_dict_single = build_generators_dict(patterns)

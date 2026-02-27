@@ -8,3 +8,6 @@ baselines/
 parameters/*.npy
 scratch/
 *.bak
+.python-version
+*.out
+*.log

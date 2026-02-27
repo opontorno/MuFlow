@@ -4,11 +4,12 @@ Auxiliary modules for MuFlow training.
 This module contains:
     - ProjectionLayer: convolutional projection bottleneck for contrastive learning
     - contrastive_loss: Siamese contrastive loss function
-    - ConvAutoencoder: per-scale convolutional autoencoder for feature reconstruction
+    - infonce_loss: InfoNCE contrastive loss function
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 # ===========================================================================
@@ -77,78 +78,49 @@ def contrastive_loss(features1, features2, labels, margin=1.0):
     return (loss_positive + loss_negative).mean()
 
 
-# ===========================================================================
-# Convolutional Autoencoder (feature reconstruction)
-# ===========================================================================
-
-class ConvAutoencoder(nn.Module):
+def infonce_loss(anchors, positives, negatives, temperature=0.07):
     """
-    Per-scale convolutional autoencoder for backbone feature reconstruction.
+    InfoNCE (Noise-Contrastive Estimation) loss.
 
-    Used to regularise the normalizing flows: the AE is trained to reconstruct
-    real-image feature maps. At inference, the reconstruction error acts as an
-    additional anomaly signal combined (via ae_lambda) with the Mahalanobis
-    distance coming from the NF flows.
+    For each anchor, maximises similarity with the positive while minimising
+    similarity with the negatives using a softmax-based cross-entropy
+    formulation.
 
-    Architecture (encoder):
-        Conv3x3  C  → C_hidden    (stride 1, padding=same)
-        BatchNorm + ReLU
-        Conv3x3  C_hidden → C_hidden  (stride 1, padding=same)
-        BatchNorm + ReLU
+    Formula:
+        L = -log( exp(sim(a, p) / τ) / (exp(sim(a, p) / τ) + Σ_j exp(sim(a, n_j) / τ)) )
 
-    Architecture (decoder, symmetric):
-        Conv3x3  C_hidden → C_hidden  (stride 1, padding=same)
-        BatchNorm + ReLU
-        Conv3x3  C_hidden → C         (stride 1, padding=same)
-        Tanh
-
-    The spatial resolution H×W is preserved throughout (no pooling/upsampling),
-    which keeps the output shape identical to the input.
+    where sim is cosine similarity and τ is the temperature.
 
     Args:
-        in_channels (int): Number of feature channels C
-        hidden_ratio (float): Ratio for bottleneck hidden channels (default: 0.5)
+        anchors:    Feature tensor (B, C, H, W) — anchor samples
+        positives:  Feature tensor (B, C, H, W) — positive matches (one per anchor)
+        negatives:  Feature tensor (B, C, H, W) — negative samples (one per anchor,
+                    all negatives in the batch are shared across anchors)
+        temperature (float): Temperature scaling factor (default: 0.07)
+
+    Returns:
+        Scalar loss value
     """
+    # Flatten spatial dimensions: (B, C, H, W) -> (B, D)
+    a = anchors.flatten(1)
+    p = positives.flatten(1)
+    n = negatives.flatten(1)
 
-    def __init__(self, in_channels: int, hidden_ratio: float = 0.5):
-        super(ConvAutoencoder, self).__init__()
+    # L2-normalise for cosine similarity
+    a = F.normalize(a, dim=1)
+    p = F.normalize(p, dim=1)
+    n = F.normalize(n, dim=1)
 
-        self.in_channels = in_channels
-        hidden_channels = max(1, int(in_channels * hidden_ratio))
+    # Positive similarity: (B,) — each anchor with its own positive
+    pos_sim = (a * p).sum(dim=1, keepdim=True) / temperature  # (B, 1)
 
-        self.encoder = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(hidden_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(hidden_channels),
-            nn.ReLU(inplace=True),
-        )
+    # Negative similarities: each anchor against ALL negatives in the batch
+    neg_sim = torch.mm(a, n.t()) / temperature  # (B, B)
 
-        self.decoder = nn.Sequential(
-            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(hidden_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_channels, in_channels, kernel_size=3, padding=1, bias=False),
-        )
+    # Logits: positive in column 0, negatives in columns 1..B
+    logits = torch.cat([pos_sim, neg_sim], dim=1)  # (B, 1+B)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Feature tensor of shape (B, C, H, W)
-        Returns:
-            Reconstructed tensor of shape (B, C, H, W)
-        """
-        return self.decoder(self.encoder(x))
+    # Target: the positive is always at index 0
+    targets = torch.zeros(a.size(0), dtype=torch.long, device=a.device)
 
-    def reconstruction_loss(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Computes mean MSE reconstruction loss between input and reconstruction.
-
-        Args:
-            x: Feature tensor (B, C, H, W)
-        Returns:
-            Scalar loss
-        """
-        x_hat = self.forward(x)
-        return torch.nn.functional.mse_loss(x_hat, x)
+    return F.cross_entropy(logits, targets)

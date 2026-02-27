@@ -1,5 +1,6 @@
 import argparse
 import os
+import glob as glob_module
 import torch
 import yaml
 import joblib
@@ -7,6 +8,9 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 from scipy.stats import norm
+from tqdm import tqdm
+
+from PIL import Image
 
 from muflow import constants as const
 from muflow import dataset
@@ -17,7 +21,13 @@ from sklearn.neighbors import LocalOutlierFactor
 from joblib import Parallel, delayed
 import time
 
-GANS = ['StyleGAN', 'StyleGAN2', 'StyleGAN3', 'STARGAN', 'AttGAN', 'GDWCT']
+GANS = [
+    'StyleGAN',
+    'StyleGAN2', 
+    'StyleGAN3', 
+    'STARGAN', 
+    'AttGAN', 
+    'GDWCT']
 DM_OPEN = ['Flux.1', 'Stable DIffusion 3.5', 'Stable Diffusion XL', 'Stable Cascade', 'Stable Diffusion Attend and Excite']
 DM_CLOSED = ['Dall-E 3', 'Midjourney', 'Starry AI', 'Deep AI', 'Hotpot AI', 'Nvidia Sana PAG', 'Tencent Hunyuan', 'Flux.1.1 Pro']
 
@@ -30,7 +40,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Evaluate a MuFlow run. All settings are loaded automatically "
                     "from run_dir/run_config.yaml. Only eval-specific options are needed.")
-    parser.add_argument("--run_dir", type=str,
+    parser.add_argument("--run_dir", type=str, required=True,
                         help="Directory of a training run (must contain best.pt, "
                              "thresholds.npz and run_config.yaml).")
     parser.add_argument("--test", type=str, default=None,
@@ -38,6 +48,12 @@ def parse_args():
     parser.add_argument("--on_celeba", action='store_true',
                         help="Use CelebA-HQ test dataloader (adds class 99 OOD Real).")
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--custom_dirs", type=str, nargs='+', default=None,
+                        help="One or more folder paths or glob patterns containing images to evaluate "
+                             "(png/jpg/jpeg). Each dir needs a corresponding entry in --custom_labels.")
+    parser.add_argument("--custom_labels", type=int, nargs='+', default=None,
+                        help="Class label for each --custom_dirs entry: 0=real, 1=fake. "
+                             "Must have the same length as --custom_dirs.")
 
     args = parser.parse_args()
 
@@ -220,16 +236,165 @@ def build_model(config, args):
         backbone_weights=args.backbone_weights if hasattr(args, 'backbone_weights') and args.backbone_weights else None,
         out_indices=out_indices,
         pooling_type=pooling_type,
-        use_adversarial=args.use_adversarial == 1 if hasattr(args, 'use_adversarial') else False,
-        noise_differentiable=args.noise_differentiable == 1 if hasattr(args, 'noise_differentiable') else False,
         use_proj_layer=args.use_proj_layer == 1 if hasattr(args, 'use_proj_layer') else False,
         proj_hidden_ratio=args.proj_hidden_ratio if hasattr(args, 'proj_hidden_ratio') else 0.5,
-        use_autoencoder=args.use_autoencoder == 1 if hasattr(args, 'use_autoencoder') else False,
-        ae_hidden_ratio=args.ae_hidden_ratio if hasattr(args, 'ae_hidden_ratio') else 0.5,
     )
     print(f"Model A.D. Param#: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     return model
 
+
+# ---------------------------------------------------------------------------
+# Custom-dir helpers
+# ---------------------------------------------------------------------------
+
+def _dir_name_from_path(path_or_glob):
+    """Return a human-readable name from a plain path or a glob pattern."""
+    parts = path_or_glob.replace('\\', '/').rstrip('/').split('/')
+    for part in reversed(parts):
+        if part and '*' not in part and '?' not in part:
+            return part
+    return f"dir_{abs(hash(path_or_glob)) % 10000}"
+
+
+def collect_custom_images(path_or_glob):
+    """Collect image paths from a directory or a glob pattern (png/jpg/jpeg)."""
+    valid_ext = {'.png', '.jpg', '.jpeg'}
+    img_exts = ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']
+
+    if os.path.isdir(path_or_glob):
+        paths = []
+        for ext in img_exts:
+            paths.extend(glob_module.glob(os.path.join(path_or_glob, ext)))
+        return list(np.unique(paths))
+
+    matched = glob_module.glob(path_or_glob, recursive=True)
+    paths = []
+    for p in matched:
+        if os.path.isdir(p):
+            for ext in img_exts:
+                paths.extend(glob_module.glob(os.path.join(p, ext)))
+        elif os.path.isfile(p) and os.path.splitext(p)[1].lower() in valid_ext:
+            paths.append(p)
+    return list(np.unique(paths))
+
+
+class CustomImageDataset(torch.utils.data.Dataset):
+    """Minimal dataset wrapping arbitrary image paths with a fixed class label."""
+
+    def __init__(self, image_paths, labels, input_size, use_fourier=False):
+        self.image_paths = image_paths
+        self.labels = labels
+        # Reuse the exact same transform pipeline as the rest of MuFlow
+        self.transform = dataset.create_image_transform(
+            input_size, use_fourier=use_fourier, is_train=False, use_augs=False
+        )
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img = Image.open(self.image_paths[idx]).convert('RGB')
+        return self.transform(img), self.labels[idx]
+
+
+def create_custom_dataloader(args, config):
+    """
+    Build a DataLoader from --custom_dirs / --custom_labels.
+
+    label=0 → real  (expected model output: 0, i.e. inlier)
+    label=1 → fake  (expected model output: 1, i.e. anomaly)
+
+    Each dir gets its own entry in idx_to_name so accuracy is reported
+    per directory.  Multiple dirs with the same raw label are kept separate.
+    Returns (DataLoader, list of {name, expected_label, slice} dicts).
+    """
+    if args.custom_labels is None or len(args.custom_labels) != len(args.custom_dirs):
+        raise ValueError(
+            "--custom_labels must be provided and have the same length as --custom_dirs."
+        )
+
+    all_paths, all_group_ids = [], []
+    groups = []  # [{name, expected_label, group_id}]
+
+    for gid, (d, lbl) in enumerate(zip(args.custom_dirs, args.custom_labels)):
+        if lbl not in (0, 1):
+            raise ValueError(f"--custom_labels must be 0 or 1, got {lbl} for dir '{d}'.")
+        name = _dir_name_from_path(d)
+        paths = collect_custom_images(d)
+        if not paths:
+            print(f"[warn] No images found: {d}")
+            continue
+        groups.append({'name': name, 'expected_label': lbl, 'group_id': gid, 'n': len(paths)})
+        all_paths.extend(paths)
+        all_group_ids.extend([gid] * len(paths))
+        label_str = 'real (0)' if lbl == 0 else 'fake (1)'
+        print(f"  [{gid}] {name}  → {label_str}: {len(paths)} images")
+
+    if not all_paths:
+        raise ValueError("No images found in any of the provided custom dirs.")
+
+    ds = CustomImageDataset(
+        image_paths=all_paths,
+        labels=all_group_ids,
+        input_size=config["input_size"],
+        use_fourier=args.use_fourier == 1,
+    )
+    loader = torch.utils.data.DataLoader(
+        ds, batch_size=64, shuffle=False,
+        num_workers=getattr(args, 'num_workers', 4),
+        drop_last=False,
+    )
+    return loader, groups
+
+
+def eval_custom(dataloader, model, groups, threshold_info):
+    """Accuracy-only evaluation for custom dirs. Works with any mix of classes."""
+    model.eval()
+    preds_list, group_ids_list = [], []
+    device = next(model.nf_flows[0].parameters()).device
+
+    for data, gids in tqdm(dataloader, desc="Evaluating custom dirs"):
+        data = data.to(device)
+        with torch.no_grad():
+            ret = model(data)
+        preds_list.append(ret["loss"].cpu())
+        group_ids_list.append(gids)
+
+    scores = torch.cat(preds_list).numpy()          # raw anomaly scores
+    group_ids = torch.cat(group_ids_list).numpy()
+
+    # Apply threshold → binary predictions (1 = anomaly/fake, 0 = inlier/real)
+    if 'lof' in threshold_info:
+        binary_preds = (threshold_info['lof'].predict(scores.reshape(-1, 1)) < 0).astype(int)
+    elif 'l_threshold' in threshold_info and 'u_threshold' in threshold_info:
+        binary_preds = (
+            (scores < threshold_info['l_threshold']) |
+            (scores > threshold_info['u_threshold'])
+        ).astype(int)
+    elif 'threshold' in threshold_info and threshold_info['threshold'] is not None:
+        binary_preds = (scores > threshold_info['threshold']).astype(int)
+    else:
+        raise ValueError("threshold_info must contain 'l_threshold'/'u_threshold', 'threshold', or 'lof'.")
+
+    print("\nCustom-dirs evaluation results")
+    print("=" * 50)
+    for g in groups:
+        gid = g['group_id']
+        expected = g['expected_label']
+        mask = group_ids == gid
+        if mask.sum() == 0:
+            continue
+        g_scores = scores[mask]
+        g_preds  = binary_preds[mask]
+        acc = (g_preds == expected).mean()
+        print(f"  [{g['name']}]  expected={'real(0)' if expected == 0 else 'fake(1)'}  "
+              f"N={mask.sum()}  "
+              f"Accuracy={acc:.4f}  "
+              f"Score={g_scores.mean():.4f}\u00b1{g_scores.std():.4f}")
+    print("=" * 50)
+
+
+# ---------------------------------------------------------------------------
 
 def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx, y_true_0_base, y_pred_0_base):
     """Compute balanced binary metrics for one fake class vs the real baseline."""
@@ -422,6 +587,17 @@ def evaluate(args):
     if args.use_lof == 1 and os.path.exists(lof_checkpoint):
         threshold_info['lof'] = joblib.load(lof_checkpoint)
         print(f"Loaded LOF model from {lof_checkpoint}")
+
+    # ----------------------------------------------------------------
+    # Custom-dirs evaluation mode (skips attacks loop)
+    # ----------------------------------------------------------------
+    if args.custom_dirs is not None:
+        print(f"\n{'='*60}")
+        print("Custom dirs evaluation")
+        print(f"{'='*60}")
+        custom_loader, groups = create_custom_dataloader(args, config)
+        eval_custom(custom_loader, model, groups, threshold_info)
+        return
 
     attacks_configs = [
         ('none', {}),

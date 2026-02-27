@@ -6,31 +6,115 @@ import pdb
 from tqdm import tqdm, trange
 from PIL import Image
 import argparse
+from muflow.constants import DATA_DIR
 
 def get_args():
     parser = argparse.ArgumentParser(description="Generate mean images for WILD and real datasets")
     parser.add_argument('--num_images', type=int, default=1000, help='Number of mean images to generate per class/folder')
     parser.add_argument('--mean_size', type=int, default=500, help='Number of images to average for each mean image')
     parser.add_argument('--output_dir', type=str, default=None, help='Directory to save generated mean images')
-    parser.add_argument('--ff4all_glob', type=str, default='/media/orazio_mattia_group/ad4dd/WILD/**/*', help='Glob path for WILD folders')
-    parser.add_argument('--ff4all_base', type=str, default='/media/orazio_mattia_group/ad4dd/WILD', help='Base path for WILD images')
-    parser.add_argument('--datasets_dfx_glob', type=str, default='/media/orazio_mattia_group/ad4dd/datasets_DFX/*', help='Glob path for datasets_DFX folders')
-    parser.add_argument('--datasets_dfx_base', type=str, default='/media/orazio_mattia_group/ad4dd/datasets_DFX', help='Base path for datasets_DFX images')
-    parser.add_argument('--celeba_hq_glob', type=str, default='/media/orazio_mattia_group/ad4dd/celeba_hq/**/**/*.jpg', help='Glob path for CelebA-HQ dataset')
-    parser.add_argument('--ffhq_glob', type=str, default='/media/orazio_mattia_group/ad4dd/ffhq/*/*.png', help='Glob path for FFHQ real images')
+    parser.add_argument('--ff4all_glob', type=str, default=os.path.join(DATA_DIR, 'WILD', '**', '*'), help='Glob path for WILD folders')
+    parser.add_argument('--ff4all_base', type=str, default=os.path.join(DATA_DIR, 'WILD'), help='Base path for WILD images')
+    parser.add_argument('--datasets_dfx_glob', type=str, default=os.path.join(DATA_DIR, 'datasets_DFX', '*'), help='Glob path for datasets_DFX folders')
+    parser.add_argument('--datasets_dfx_base', type=str, default=os.path.join(DATA_DIR, 'datasets_DFX'), help='Base path for datasets_DFX images')
+    parser.add_argument('--celeba_hq_glob', type=str, default=os.path.join(DATA_DIR, 'celeba_hq', '**', '**', '*.jpg'), help='Glob path for CelebA-HQ dataset')
+    parser.add_argument('--ffhq_glob', type=str, default=os.path.join(DATA_DIR, 'ffhq', '*', '*.png'), help='Glob path for FFHQ real images')
     parser.add_argument('--real_folders', type=str, nargs='+', default=['ffhq'], help='List of real folders to process')
+    parser.add_argument('--input_dir', type=str, default=None,
+                        help='Optional: path to a folder OR glob pattern containing images (.png/.jpg/.jpeg) to process in generic mode')
     args = parser.parse_args()
 
     if args.output_dir is None:
-        args.output_dir = f"/media/orazio_mattia_group/ad4dd/WILD_means/{args.mean_size}/"
+        args.output_dir = os.path.join(DATA_DIR, f"WILD_means/{args.mean_size}/")
 
     return args
+
+
+def collect_images_from_dir(input_dir):
+    extensions = ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']
+    image_paths = []
+    for ext in extensions:
+        image_paths.extend(glob.glob(os.path.join(input_dir, ext)))
+    return np.unique(image_paths)
+
+
+def collect_images_from_input(input_path_or_glob):
+    valid_ext = {'.png', '.jpg', '.jpeg'}
+
+    if os.path.isdir(input_path_or_glob):
+        return collect_images_from_dir(input_path_or_glob)
+
+    matched_paths = glob.glob(input_path_or_glob, recursive=True)
+    image_paths = []
+
+    for path in matched_paths:
+        if os.path.isdir(path):
+            image_paths.extend(collect_images_from_dir(path))
+        elif os.path.isfile(path):
+            ext = os.path.splitext(path)[1].lower()
+            if ext in valid_ext:
+                image_paths.append(path)
+
+    return np.unique(image_paths)
+
+
+def generate_means_from_paths(pattern_list, save_dir, num_images, mean_size, resize_to=None):
+    os.makedirs(save_dir, exist_ok=True)
+
+    if len(pattern_list) < mean_size:
+        print(f"Not enough images in '{save_dir}' to create mean images. Skipping.")
+        return
+
+    np.random.shuffle(pattern_list)
+
+    if resize_to is None:
+        images = np.array([plt.imread(img) for img in pattern_list])
+    else:
+        images = np.array([np.array(Image.open(img).convert('RGB').resize(resize_to)) for img in pattern_list])
+
+    bar = tqdm(range(num_images), desc=f"Generating means [{os.path.basename(save_dir)}]", leave=False)
+    for i in bar:
+        save_path = os.path.join(save_dir, f'{i}.png')
+        if os.path.exists(save_path):
+            bar.set_postfix_str(f"Skipped {i}")
+            continue
+
+        np.random.shuffle(images)
+        img_mean = images[:mean_size].mean(0)
+
+        if img_mean.dtype != np.uint8:
+            img_mean = np.clip(img_mean, 0, 255).astype(np.uint8)
+
+        plt.imsave(save_path, img_mean)
+        bar.set_postfix_str(f"Saved {i}")
 
 def main():
     args = get_args()
     num_images = args.num_images
     mean_size = args.mean_size
     output_dir = args.output_dir
+
+    if args.input_dir is not None:
+        if args.output_dir is not None:
+            generic_save_dir = args.output_dir
+        else:
+            generic_folder_name = os.path.basename(os.path.normpath(args.input_dir))
+            generic_save_dir = os.path.join(output_dir, generic_folder_name)
+
+        pattern_list = collect_images_from_input(args.input_dir)
+        if len(pattern_list) == 0:
+            print(f"No PNG/JPG images found for input path/glob: {args.input_dir}")
+            return
+
+        print(f"Processing generic folder: {args.input_dir}")
+        generate_means_from_paths(
+            pattern_list=pattern_list,
+            save_dir=generic_save_dir,
+            num_images=num_images,
+            mean_size=mean_size,
+            resize_to=(256, 256)
+        )
+        return
 
     ff4all_folders = glob.glob(args.ff4all_glob)
     fake_folders = [fold.split('/')[-1] for fold in ff4all_folders if os.path.isdir(fold)]
@@ -59,20 +143,13 @@ def main():
             if len(pattern_list) < mean_size:
                 print(f"Not enough images in folder '{folder}' to create mean images. Skipping.")
                 continue
-            images = np.array([plt.imread(img) for img in pattern_list])
-
-            bar = tqdm(range(num_images), desc=f"Generating means [{folder}]", leave=False)
-            for i in bar:
-                save_path = os.path.join(output_dir, folder, f'{i}.png')
-                if os.path.exists(save_path):
-                    bar.set_postfix_str(f"Skipped {i}")
-                    continue
-
-                np.random.shuffle(images)
-                img_mean = images[:mean_size].mean(0)
-
-                plt.imsave(save_path, img_mean)
-                bar.set_postfix_str(f"Saved {i}")
+            generate_means_from_paths(
+                pattern_list=pattern_list,
+                save_dir=os.path.join(output_dir, folder),
+                num_images=num_images,
+                mean_size=mean_size,
+                resize_to=None
+            )
         except Exception as e:
             print(f"Error processing folder '{folder}': {e}")
 
@@ -99,20 +176,13 @@ def main():
             print(f"Not enough images in real folder '{folder}' to create mean images. Skipping.")
             continue
 
-        images = np.array([np.array(Image.open(img).resize((256,256))) for img in pattern_list])
-
-        bar = tqdm(range(num_images), desc=f"Generating means [{folder}]", leave=False)
-        for i in bar:
-            save_path = os.path.join(output_dir, folder, f'{i}.png')
-            if os.path.exists(save_path):
-                bar.set_postfix_str(f"Skipped {i}")
-                continue
-
-            np.random.shuffle(images)
-            img_mean = images[:mean_size].mean(0)
-
-            plt.imsave(save_path, img_mean.astype(np.uint8))
-            bar.set_postfix_str(f"Saved {i}")
+        generate_means_from_paths(
+            pattern_list=pattern_list,
+            save_dir=os.path.join(output_dir, folder),
+            num_images=num_images,
+            mean_size=mean_size,
+            resize_to=(256, 256)
+        )
 
 if __name__ == '__main__':
     main()
