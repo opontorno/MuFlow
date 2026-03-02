@@ -11,3 +11,5 @@ scratch/
 .python-version
 *.out
 *.log
+main_*.py
+eval_*.py

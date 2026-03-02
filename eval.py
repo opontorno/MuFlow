@@ -1,3 +1,11 @@
+"""
+MuFlow — Base evaluation script.
+
+Standard normalizing-flow evaluation pipeline. No projection layer, no SRM.
+For variants see:
+    - eval_proj.py  (+ projection layer / contrastive learning)
+    - eval_srm.py   (+ SRM noise-residual scorer)
+"""
 import argparse
 import os
 import glob as glob_module
@@ -23,10 +31,10 @@ import time
 
 GANS = [
     'StyleGAN',
-    'StyleGAN2', 
-    'StyleGAN3', 
-    'STARGAN', 
-    'AttGAN', 
+    'StyleGAN2',
+    'StyleGAN3',
+    'STARGAN',
+    'AttGAN',
     'GDWCT']
 DM_OPEN = ['Flux.1', 'Stable DIffusion 3.5', 'Stable Diffusion XL', 'Stable Cascade', 'Stable Diffusion Attend and Excite']
 DM_CLOSED = ['Dall-E 3', 'Midjourney', 'Starry AI', 'Deep AI', 'Hotpot AI', 'Nvidia Sana PAG', 'Tencent Hunyuan', 'Flux.1.1 Pro']
@@ -34,7 +42,9 @@ DM_CLOSED = ['Dall-E 3', 'Midjourney', 'Starry AI', 'Deep AI', 'Hotpot AI', 'Nvi
 MIX_2CLASS = ['STARGAN', 'StyleGAN2', 'Stable DIffusion 3.5', 'Flux.1.1 Pro']
 
 
-
+# ═══════════════════════════════════════════════════════════════════════════
+# CLI
+# ═══════════════════════════════════════════════════════════════════════════
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -64,11 +74,11 @@ def parse_args():
                      "Make sure the run has saved at least one best checkpoint.")
     saved = yaml.safe_load(open(run_cfg_path))
     for k, v in saved.items():
-        if not hasattr(args, k):   # don't overwrite CLI args (run_dir, test, on_celeba, num_workers)
+        if not hasattr(args, k):
             setattr(args, k, v)
 
     # Resolve file paths relative to run_dir
-    args.checkpoint    = os.path.join(args.run_dir, 'best.pt')
+    args.checkpoint     = os.path.join(args.run_dir, 'best.pt')
     args.threshold_path = os.path.join(args.run_dir, 'thresholds.npz')
     args.lof_checkpoint = os.path.join(args.run_dir, 'lof_model.pkl')
 
@@ -77,6 +87,10 @@ def parse_args():
     print(f"[eval] alpha={args.alpha}")
     return args
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Data loaders
+# ═══════════════════════════════════════════════════════════════════════════
 
 def build_val_data_loader(args, config):
     """Build validation dataloader (real images only, same split used during training)."""
@@ -100,60 +114,10 @@ def build_val_data_loader(args, config):
     )
 
 
-def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto', alpha=0.1):
-    """
-    Compute anomaly-detection threshold from the validation set (real images).
-    Mirrors compute_threshold() in main.py exactly.
-    """
-    model.eval()
-    loss_values = []
-    device = next(model.nf_flows[0].parameters()).device
-
-    for batch in val_dataloader:
-        if isinstance(batch, (list, tuple)) and len(batch) == 2:
-            data, _ = batch
-        else:
-            data = batch
-        data = data.to(device)
-        with torch.no_grad():
-            ret = model(data)
-            loss_values.append(ret["loss"].cpu())
-
-    if not loss_values:
-        raise ValueError("No validation samples found. Check val dataloader.")
-
-    losses = torch.cat(loss_values).numpy()
-    mean, std = float(losses.mean()), float(losses.std())
-
-    result = {
-        'threshold': None,
-        'mean': mean,
-        'std': std,
-        'losses': losses,
-    }
-
-    if use_lof:
-        lof = LocalOutlierFactor(novelty=True, contamination=contamination, n_jobs=-1)
-        lof.fit(losses.reshape(-1, 1))
-        result['lof'] = lof
-    else:
-        z = norm.ppf(1 - alpha)
-        result['l_threshold'] = float(mean - z * std)
-        result['u_threshold'] = float(mean + z * std)
-
-    l = result.get('l_threshold')
-    u = result.get('u_threshold')
-    bounds = f"[{l:.4f}, {u:.4f}]" if l is not None else "(LOF)"
-    print(f"Threshold computation done.  mean={mean:.4f}  std={std:.4f}  {bounds}")
-    return result
-
-
 def create_dataloader(args, config, opt):
-
     attack_type = getattr(opt, 'attack_type', 'none')
     attack_params = getattr(opt, 'attack_params', {})
 
-    # The data loading code remains the same
     test_dataset = dataset.Dataset(
         dataset_name=args.data,
         reals_name=args.reals,
@@ -181,7 +145,6 @@ def create_dataloader(args, config, opt):
 
 
 def create_dataloader_w_celeba(args, config, opt):
-
     attack_type = getattr(opt, 'attack_type', 'none')
     attack_params = getattr(opt, 'attack_params', {})
 
@@ -211,6 +174,10 @@ def create_dataloader_w_celeba(args, config, opt):
     return data_loader, {v: k for k, v in class_to_idx_.items()}
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Model
+# ═══════════════════════════════════════════════════════════════════════════
+
 def build_model(config, args):
     out_indices = config.get("out_indices", [1, 2, 3])
     out_indices_str = str(out_indices)
@@ -236,16 +203,60 @@ def build_model(config, args):
         backbone_weights=args.backbone_weights if hasattr(args, 'backbone_weights') and args.backbone_weights else None,
         out_indices=out_indices,
         pooling_type=pooling_type,
-        use_proj_layer=args.use_proj_layer == 1 if hasattr(args, 'use_proj_layer') else False,
-        proj_hidden_ratio=args.proj_hidden_ratio if hasattr(args, 'proj_hidden_ratio') else 0.5,
+        use_proj_layer=False,
+        proj_hidden_ratio=0.5,
     )
     print(f"Model A.D. Param#: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     return model
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# Threshold
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto', alpha=0.1):
+    """Compute anomaly-detection threshold from the validation set (real images)."""
+    model.eval()
+    loss_values = []
+    device = next(model.nf_flows[0].parameters()).device
+
+    for batch in val_dataloader:
+        if isinstance(batch, (list, tuple)) and len(batch) == 2:
+            data, _ = batch
+        else:
+            data = batch
+        data = data.to(device)
+        with torch.no_grad():
+            ret = model(data)
+            loss_values.append(ret["loss"].cpu())
+
+    if not loss_values:
+        raise ValueError("No validation samples found. Check val dataloader.")
+
+    losses = torch.cat(loss_values).numpy()
+    mean, std = float(losses.mean()), float(losses.std())
+
+    result = {'threshold': None, 'mean': mean, 'std': std, 'losses': losses}
+
+    if use_lof:
+        lof = LocalOutlierFactor(novelty=True, contamination=contamination, n_jobs=-1)
+        lof.fit(losses.reshape(-1, 1))
+        result['lof'] = lof
+    else:
+        z = norm.ppf(1 - alpha)
+        result['l_threshold'] = float(mean - z * std)
+        result['u_threshold'] = float(mean + z * std)
+
+    l = result.get('l_threshold')
+    u = result.get('u_threshold')
+    bounds = f"[{l:.4f}, {u:.4f}]" if l is not None else "(LOF)"
+    print(f"Threshold computation done.  mean={mean:.4f}  std={std:.4f}  {bounds}")
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Custom-dir helpers
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _dir_name_from_path(path_or_glob):
     """Return a human-readable name from a plain path or a glob pattern."""
@@ -284,7 +295,6 @@ class CustomImageDataset(torch.utils.data.Dataset):
     def __init__(self, image_paths, labels, input_size, use_fourier=False):
         self.image_paths = image_paths
         self.labels = labels
-        # Reuse the exact same transform pipeline as the rest of MuFlow
         self.transform = dataset.create_image_transform(
             input_size, use_fourier=use_fourier, is_train=False, use_augs=False
         )
@@ -298,23 +308,13 @@ class CustomImageDataset(torch.utils.data.Dataset):
 
 
 def create_custom_dataloader(args, config):
-    """
-    Build a DataLoader from --custom_dirs / --custom_labels.
-
-    label=0 → real  (expected model output: 0, i.e. inlier)
-    label=1 → fake  (expected model output: 1, i.e. anomaly)
-
-    Each dir gets its own entry in idx_to_name so accuracy is reported
-    per directory.  Multiple dirs with the same raw label are kept separate.
-    Returns (DataLoader, list of {name, expected_label, slice} dicts).
-    """
     if args.custom_labels is None or len(args.custom_labels) != len(args.custom_dirs):
         raise ValueError(
             "--custom_labels must be provided and have the same length as --custom_dirs."
         )
 
     all_paths, all_group_ids = [], []
-    groups = []  # [{name, expected_label, group_id}]
+    groups = []
 
     for gid, (d, lbl) in enumerate(zip(args.custom_dirs, args.custom_labels)):
         if lbl not in (0, 1):
@@ -348,7 +348,7 @@ def create_custom_dataloader(args, config):
 
 
 def eval_custom(dataloader, model, groups, threshold_info):
-    """Accuracy-only evaluation for custom dirs. Works with any mix of classes."""
+    """Accuracy-only evaluation for custom dirs."""
     model.eval()
     preds_list, group_ids_list = [], []
     device = next(model.nf_flows[0].parameters()).device
@@ -360,10 +360,9 @@ def eval_custom(dataloader, model, groups, threshold_info):
         preds_list.append(ret["loss"].cpu())
         group_ids_list.append(gids)
 
-    scores = torch.cat(preds_list).numpy()          # raw anomaly scores
+    scores = torch.cat(preds_list).numpy()
     group_ids = torch.cat(group_ids_list).numpy()
 
-    # Apply threshold → binary predictions (1 = anomaly/fake, 0 = inlier/real)
     if 'lof' in threshold_info:
         binary_preds = (threshold_info['lof'].predict(scores.reshape(-1, 1)) < 0).astype(int)
     elif 'l_threshold' in threshold_info and 'u_threshold' in threshold_info:
@@ -394,7 +393,9 @@ def eval_custom(dataloader, model, groups, threshold_info):
     print("=" * 50)
 
 
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# Evaluation
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx, y_true_0_base, y_pred_0_base):
     """Compute balanced binary metrics for one fake class vs the real baseline."""
@@ -426,6 +427,7 @@ def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx, y_t
         'roc': roc_auc_score(y_true_binary, y_pred_balanced),
     }
 
+
 def eval_once(dataloader, model, class2idx=None, threshold_info=None):
     model.eval()
     labels_list = []
@@ -441,9 +443,9 @@ def eval_once(dataloader, model, class2idx=None, threshold_info=None):
 
     preds_ = torch.cat(preds_list, dim=0).numpy()
     labels = torch.cat(labels_list, dim=0).numpy()
+
     print("Testing done")
 
-    # --- Apply threshold ---
     if threshold_info is None:
         raise ValueError("threshold_info must be provided.")
 
@@ -452,7 +454,6 @@ def eval_once(dataloader, model, class2idx=None, threshold_info=None):
     elif 'l_threshold' in threshold_info and 'u_threshold' in threshold_info:
         preds = ((preds_ < threshold_info['l_threshold']) | (preds_ > threshold_info['u_threshold'])).astype(int)
     elif 'threshold' in threshold_info and threshold_info['threshold'] is not None:
-        # Legacy single-threshold (only upper bound)
         preds = (preds_ > threshold_info['threshold']).astype(int)
     else:
         raise ValueError("threshold_info must contain 'l_threshold'/'u_threshold', 'threshold', or 'lof'.")
@@ -536,6 +537,10 @@ def eval_once(dataloader, model, class2idx=None, threshold_info=None):
     print("=" * 30 + "\n")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Main evaluation entry
+# ═══════════════════════════════════════════════════════════════════════════
+
 def evaluate(args):
     config = yaml.safe_load(open(args.config, "r"))
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
@@ -544,13 +549,10 @@ def evaluate(args):
     model.load_state_dict(checkpoint["model_state_dict"])
     model.cuda()
 
-    # ----------------------------------------------------------------
-    # Threshold: load from file if available, else compute on val set.
-    # ----------------------------------------------------------------
+    # ── Threshold: load from file if available, else compute on val set ──
     threshold_info = None
 
     if os.path.exists(args.threshold_path):
-        # --- Load pre-computed thresholds from file ---
         threshold_path = args.threshold_path
         if threshold_path.endswith('.npz'):
             loaded = np.load(threshold_path, allow_pickle=True)
@@ -572,7 +574,6 @@ def evaluate(args):
                 }
         print(f"Threshold loaded from {threshold_path}")
     else:
-        # --- Compute on validation set ---
         print("Computing threshold on validation set...")
         val_dataloader = build_val_data_loader(args, config)
         threshold_info = compute_threshold(
@@ -588,9 +589,7 @@ def evaluate(args):
         threshold_info['lof'] = joblib.load(lof_checkpoint)
         print(f"Loaded LOF model from {lof_checkpoint}")
 
-    # ----------------------------------------------------------------
-    # Custom-dirs evaluation mode (skips attacks loop)
-    # ----------------------------------------------------------------
+    # ── Custom-dirs evaluation mode ──
     if args.custom_dirs is not None:
         print(f"\n{'='*60}")
         print("Custom dirs evaluation")
