@@ -19,9 +19,9 @@ import pdb
 
 # === Argument Parser ===
 parser = argparse.ArgumentParser(description='Generate GMM parameters for FastFlow')
-parser.add_argument('--model_name', type=str, default='resnet50', help='Backbone model name')
-parser.add_argument('--reals', type=str, default='ffhq', choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'], help='Real images dataset')
-parser.add_argument('--use_fourier', action='store_true', help='Use Fourier magnitude spectrum instead of RGB')
+parser.add_argument('-model', '--model_name', type=str, default='resnet50', help='Backbone model name')
+parser.add_argument('-reals', '--reals', type=str, default='ffhq', choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'], help='Real images dataset')
+parser.add_argument('-fourier', '--use_fourier', action='store_true', help='Use Fourier magnitude spectrum instead of RGB')
 args = parser.parse_args()
 
 # === Hyperparameters ===
@@ -219,12 +219,28 @@ print("Feature extraction complete!")
 gmm = {"real": []}
 
 print("\nFitting Gaussian Mixture Models...")
-clf = GaussianMixture(n_components=n_components, reg_covar=1e-6, random_state=42)
+REG_COVAR_SCHEDULE = [1e-6, 1e-4, 1e-2, 1e-1, 1.0]
 for i in range(num_layers):
-    real_features_ = np.stack([feats[i] for feats in real_features])
+    real_features_ = np.stack([feats[i] for feats in real_features]).astype(np.float64)
+    n_samples, n_features = real_features_.shape
     print(f"  Layer {i} (out_indices[{i}]={out_indices[i]}): shape {real_features_.shape}")
     
-    clf.fit(real_features_)
+    fitted = False
+    for reg in REG_COVAR_SCHEDULE:
+        try:
+            clf = GaussianMixture(n_components=n_components, reg_covar=reg, random_state=42)
+            clf.fit(real_features_)
+            if reg > REG_COVAR_SCHEDULE[0]:
+                print(f"    ⚠️  Fitted with reg_covar={reg} (n={n_samples} < d={n_features}, covariance is rank-deficient)")
+            fitted = True
+            break
+        except ValueError:
+            continue
+    
+    if not fitted:
+        raise RuntimeError(f"GMM fit failed for layer {i} even with reg_covar={REG_COVAR_SCHEDULE[-1]}. "
+                           f"Consider using pooling_type='mean' for this backbone.")
+    
     gmm["real"].append([clf.means_, clf.covariances_])
 
 if use_fourier:
