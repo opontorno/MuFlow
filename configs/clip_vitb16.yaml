@@ -11,3 +11,4 @@ conv3x3_only: True
 pooling_type: flatten
 gmm_n_components: 1
 out_indices: [9, 10, 11]
+preprocessing: none

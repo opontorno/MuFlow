@@ -15,29 +15,30 @@ import pandas as pd
 from tqdm import tqdm
 
 from muflow.fourier_utils import FourierMagnitudeTransform, ToTensorNoScale
+from muflow.srm_utils import SRMResidualTransform
 
 
 DATA_DIR = "/media/orazio_mattia_group/ad4dd"
 CSV_PATH = '/media/orazio_mattia_group/ad4dd/dataset_split_rand.csv'
 
 
-def create_image_transform(input_size, use_fourier=False, is_train=False, use_augs=True):
+def create_image_transform(input_size, preprocessing="none", is_train=False, use_augs=True):
     """
     Helper function to create image transform pipeline.
-    
+
     Pipeline structure:
         1. Resize
         2. Augmentations (if is_train and use_augs)
-        3. Fourier transform (if use_fourier)
+        3. Preprocessing transform (fourier | srm | none)
         4. ToTensor
-        5. Normalize (if NOT use_fourier)
-    
+        5. Normalize (if preprocessing == 'none')
+
     Args:
-        input_size: Target image size
-        use_fourier: Whether to use Fourier transform
-        is_train: Whether this is for training (enables augmentations)
-        use_augs: Whether to use data augmentations (only if is_train=True)
-    
+        input_size   : Target image size.
+        preprocessing: One of 'none', 'fourier', 'srm'.
+        is_train     : Whether this is for training (enables augmentations).
+        use_augs     : Whether to use data augmentations (only if is_train=True).
+
     Returns:
         torchvision.transforms.Compose object
     """
@@ -57,12 +58,17 @@ def create_image_transform(input_size, use_fourier=False, is_train=False, use_au
         ]
         pipeline.append(RandomApplyAugmentations(AUGMENTATION_POOL, min_augs=1, max_augs=2))
     
-    # 3. Add Fourier transform if enabled
-    if use_fourier:
+    # 3. Add preprocessing transform if enabled
+    if preprocessing == "fourier":
         pipeline.append(FourierMagnitudeTransform())
         pipeline.append(ToTensorNoScale())
+    elif preprocessing == "srm":
+        # Training: seed=None → random 3 filters per image (augmentation)
+        # Eval:     seed=0   → fixed 3 filters every call (reproducibility)
+        pipeline.append(SRMResidualTransform(seed=None if is_train else 0))
+        pipeline.append(ToTensorNoScale())
     else:
-        # Use standard ToTensor for RGB (converts [0,255] → [0,1])
+        # Standard RGB pipeline (converts [0,255] → [0,1] → ImageNet-normalised)
         pipeline.append(transforms.ToTensor())
         pipeline.append(transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]))
     
@@ -113,13 +119,13 @@ class RandomApplyAugmentations(torch.nn.Module):
 
 
 class Dataset:
-    def __init__(self, 
-    dataset_name, 
+    def __init__(self,
+    dataset_name,
     reals_name,
-    input_size=(224,224), 
-    is_train=True,  
+    input_size=(224, 224),
+    is_train=True,
     is_val=False,
-    use_fourier=True, 
+    preprocessing="none",
     test_name="forenSynth",
     attack_type='none',
     attack_params=None,
@@ -139,7 +145,7 @@ class Dataset:
         self.is_train = is_train
         self.is_val = is_val
         self.input_size = input_size
-        self.use_fourier = use_fourier
+        self.preprocessing = preprocessing
         self.attack_type = attack_type
         self.attack_params = attack_params if attack_params is not None else {}
         self.use_augs = use_augs
@@ -148,7 +154,7 @@ class Dataset:
     def create_dataset(self):
         if self.dataset_name == "FF++":            # TODO: sistemare patterns
             root_dir = f"{c.DATA_DIR}/dataset/train/FF++/real" if self.is_train else f"{c.DATA_DIR}/dataset/train/FF++/"
-            file_pattern = "**/c23/frames_spectrum_256/**/magnitude*.npy" if self.use_fourier else "**/c23/frames/**/*.png"
+            file_pattern = "**/c23/frames_spectrum_256/**/magnitude*.npy" if self.preprocessing == "fourier" else "**/c23/frames/**/*.png"
 
             return DeepFakeDataset(
                 root_dir=root_dir,
@@ -156,7 +162,7 @@ class Dataset:
                 input_size=self.input_size,
                 use_valid=True,
                 is_train=self.is_train,
-                use_fourier=self.use_fourier,
+                preprocessing=self.preprocessing,
                 attack_type=self.attack_type,
                 attack_params=self.attack_params,
                 use_augs=self.use_augs,
@@ -184,7 +190,7 @@ class Dataset:
                 is_train=self.is_train,
                 is_val=self.is_val,
                 reals_name=self.reals_name,
-                use_fourier=self.use_fourier,
+                preprocessing=self.preprocessing,
                 attack_type=self.attack_type,
                 attack_params=self.attack_params,
                 use_augs=self.use_augs,
@@ -197,7 +203,7 @@ class Dataset:
 
 class DeepFakeDataset(Dataset):
     def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, is_val=False, reals_name='ffhq',
-                 use_fourier=False, attack_type='none', attack_params=None, seed=124, use_augs=True, debug=False):
+                 preprocessing="none", attack_type='none', attack_params=None, seed=124, use_augs=True, debug=False):
         """
         Args:
             root_dir (str): Path to the root folder containing image data.
@@ -208,7 +214,7 @@ class DeepFakeDataset(Dataset):
         self.debug = debug
         self.is_train = is_train
         self.is_val = is_val
-        self.use_fourier = use_fourier
+        self.preprocessing = preprocessing
 
         random.seed(seed)
         np.random.seed(seed)
@@ -218,7 +224,7 @@ class DeepFakeDataset(Dataset):
             **(attack_params if attack_params is not None else {})
         )
         
-        self.image_transform = create_image_transform(input_size, use_fourier, is_train, use_augs)
+        self.image_transform = create_image_transform(input_size, preprocessing, is_train, use_augs)
 
         file_pattern = file_pattern 
         self.image_files = [np.unique(np.array(glob(os.path.join(r, file_pattern), recursive=True))) for r in root_dir]
@@ -275,14 +281,14 @@ class DeepFakeDataset(Dataset):
         image_file = self.image_files[index]
         label = self.labels[index]
 
-        # Load image as RGB (Fourier transform applied in pipeline if use_fourier=True)
+        # Load image as RGB (preprocessing transform applied in pipeline)
         image = Image.open(image_file).convert("RGB")
         
-        # Apply robustness attacks only in test mode and if not using Fourier
-        if not self.is_train and not self.use_fourier:
+        # Apply robustness attacks only in test mode and only for plain RGB input
+        if not self.is_train and self.preprocessing == "none":
             image = self.attack.apply(image)
         
-        # Apply transforms (includes Fourier if use_fourier=True)
+        # Apply transforms (includes Fourier/SRM if configured)
         image = self.image_transform(image).float()
         
         if self.is_train:

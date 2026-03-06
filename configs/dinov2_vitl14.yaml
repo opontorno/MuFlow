@@ -10,3 +10,4 @@ conv3x3_only: True
 pooling_type: mean
 gmm_n_components: 1
 out_indices: [21, 22, 23]
+preprocessing: none

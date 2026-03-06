@@ -6,3 +6,4 @@ conv3x3_only: False
 pooling_type: flatten # choices: 'mean', 'flatten', 'max', 'mean_std', 'full_flatten'
 gmm_n_components: 1
 out_indices: [1, 2, 3]  # Feature extraction layers
+preprocessing: none

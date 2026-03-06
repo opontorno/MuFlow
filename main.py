@@ -4,7 +4,7 @@ MuFlow — Base training script.
 Standard normalizing-flow training pipeline. No projection layer, no SRM.
 For variants see:
     - main_proj.py  (+ projection layer / contrastive learning)
-    - main_srm.py   (+ SRM noise-residual scorer)
+    - main_proj.py  (+ projection head)
 """
 import argparse
 from pprint import pprint
@@ -50,7 +50,6 @@ def parse_args():
 
     parser.add_argument('--wandb', default='online', choices=['online', 'offline', 'disabled'])
     parser.add_argument('--use_augs', type=int, default=0, choices=[0, 1], help="Whether to use data augmentation")
-    parser.add_argument('--use_fourier', type=int, default=0, choices=[0, 1], help="Whether to use Fourier transform")
     parser.add_argument('--run_name', type=str)
     parser.add_argument('--eval_interval', type=int, default=1)
     parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
@@ -110,7 +109,7 @@ def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last
         input_size=config["input_size"],
         is_train=is_train,
         is_val=is_val,
-        use_fourier=True if args.use_fourier == 1 else False,
+        preprocessing=config.get("preprocessing", "none"),
         use_augs=True if args.use_augs == 1 else False,
         debug=args.debug
     ).create_dataset()
@@ -153,8 +152,11 @@ def build_model(config, args):
     pooling_type = config.get("pooling_type", "mean")
     n_components = config.get("gmm_n_components", 1)
 
-    if args.use_fourier == 1:
+    preprocessing = config.get("preprocessing", "none")
+    if preprocessing == "fourier":
         gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}_{pooling_type}.npy"
+    elif preprocessing == "srm":
+        gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_srm_{args.reals}_{config['input_size']}_{pooling_type}.npy"
     else:
         gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
 
@@ -167,8 +169,6 @@ def build_model(config, args):
             "--model_name", config["backbone_name"],
             "--reals", args.reals,
         ]
-        if args.use_fourier == 1:
-            cmd.append("--use_fourier")
         subprocess.run(cmd, check=True)
         print("GMM parameters generated successfully.")
 
@@ -182,7 +182,7 @@ def build_model(config, args):
         conv3x3_only=config["conv3x3_only"],
         hidden_ratio=config["hidden_ratio"],
         gmm_values=gmm_values,
-        in_channels=1 if args.use_fourier == 1 else 3,
+        in_channels=3,
         backbone_weights=args.backbone_weights,
         out_indices=config.get("out_indices", [1, 2, 3]),
         pooling_type=pooling_type,
@@ -607,6 +607,7 @@ def train(args, config):
 
                 args_dict = vars(args).copy()
                 args_dict.pop('device', None)
+                args_dict["preprocessing"] = config.get("preprocessing", "none")
                 with open(os.path.join(checkpoint_dir, "run_config.yaml"), 'w') as f:
                     yaml.dump(args_dict, f, default_flow_style=False)
 
@@ -639,8 +640,9 @@ if __name__ == "__main__":
 
     if args.run_name is None:
         args.run_name = f"{config['backbone_name']}_{args.data}_{args.reals}"
-        if args.use_fourier == 1:
-            args.run_name += "_fourier"
+        _preprocessing = config.get("preprocessing", "none")
+        if _preprocessing != "none":
+            args.run_name += f"_{_preprocessing}"
         args.run_name += f"_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}_ld{args.lr_decay}_lp{args.lr_patience}_{config['pooling_type']}"
         if args.use_lof == 1:
             args.run_name += "_lof"

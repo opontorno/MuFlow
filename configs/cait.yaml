@@ -5,3 +5,4 @@ hidden_ratio: 0.16
 conv3x3_only: False
 pooling_type: flatten # choices: 'mean', 'flatten', 'max', 'mean_std', 'full_flatten'
 gmm_n_components: 1
+preprocessing: none

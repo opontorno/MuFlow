@@ -13,6 +13,7 @@ from sklearn.manifold import TSNE
 from sklearn.mixture import GaussianMixture
 from muflow import constants as const
 from muflow.fourier_utils import calculate_fourier_magnitude_rgb
+from muflow.srm_utils import calculate_srm_residuals
 from tqdm import tqdm
 import pdb
 
@@ -21,21 +22,22 @@ import pdb
 parser = argparse.ArgumentParser(description='Generate GMM parameters for FastFlow')
 parser.add_argument('-model', '--model_name', type=str, default='resnet50', help='Backbone model name')
 parser.add_argument('-reals', '--reals', type=str, default='ffhq', choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'], help='Real images dataset')
-parser.add_argument('-fourier', '--use_fourier', action='store_true', help='Use Fourier magnitude spectrum instead of RGB')
 args = parser.parse_args()
 
 # === Hyperparameters ===
 model_name  = args.model_name
 reals       = args.reals
-use_fourier = args.use_fourier
-
-if use_fourier and model_name in (const.DINO_BACKBONES + const.CLIP_BACKBONES):
-    raise ValueError("use_fourier is not supported for DINOv2 / CLIP backbones (they require 3-channel RGB input).")
 
 config_path = f"{const.WORKING_DIR}/configs/{model_name}.yaml"
 config = yaml.safe_load(open(config_path, "r"))
+use_fourier = config.get("use_fourier", False)  # legacy compat
+preprocessing = config.get("preprocessing", "fourier" if use_fourier else "none")
+
+if preprocessing in ("fourier", "srm") and model_name in (const.DINO_BACKBONES + const.CLIP_BACKBONES):
+    raise ValueError(f"preprocessing='{preprocessing}' is not supported for DINOv2 / CLIP backbones (they require plain RGB input).")
+
 print("Model config: ", config)
-print(f"Use Fourier: {use_fourier}")
+print(f"Preprocessing: {preprocessing}")
 print(f"Reals dataset: {reals}")
 
 # === Model Setup ===
@@ -147,26 +149,25 @@ def get_features(img, apply_normalization=False):
         else:  # cnn
             return model(img_t)
             x = x + model.pos_embed
-def get_features_from_path(path, apply_fourier=False): 
+def get_features_from_path(path, preprocessing="none"):
     """
     Load image from path and extract features.
-    
+
     Args:
-        path: Path to image file
-        apply_fourier: If True, apply Fourier transform before feature extraction
-        
+        path        : Path to image file.
+        preprocessing: One of 'none', 'fourier', 'srm'.
+
     Returns:
-        features: Extracted features from the model
+        features: Extracted features from the model.
     """
-    # Load and resize image
     img = np.array(Image.open(path).convert("RGB").resize([config['input_size'], config['input_size']]))
-    
-    # Apply Fourier transform if requested
-    if apply_fourier:
+
+    if preprocessing == "fourier":
         img = calculate_fourier_magnitude_rgb(img)
-    
-    # Extract features with ImageNet normalization (only for RGB, not Fourier)
-    features = get_features(img, apply_normalization=not apply_fourier)
+    elif preprocessing == "srm":
+        img = calculate_srm_residuals(img, seed=0)
+
+    features = get_features(img, apply_normalization=(preprocessing == "none"))
     return features
 
 
@@ -186,13 +187,13 @@ else:
     real_sample = glob(patterns_means['ffhq']) + glob(patterns_means['celeba_hq'])
 
 print(f"Number of real samples: {len(real_sample)}")
-print(f"Extracting features (Fourier: {use_fourier})...")
+print(f"Extracting features (preprocessing: {preprocessing})...")
 
 real_features = []
 for i, img_path in tqdm(enumerate(real_sample), total=len(real_sample)):
     
     # Extract features (with or without Fourier transform)
-    features = get_features_from_path(img_path, apply_fourier=use_fourier)
+    features = get_features_from_path(img_path, preprocessing=preprocessing)
     feats_ = []
     for feats in features:
         if pooling_type == 'mean':
@@ -243,8 +244,10 @@ for i in range(num_layers):
     
     gmm["real"].append([clf.means_, clf.covariances_])
 
-if use_fourier:
+if preprocessing == "fourier":
     output_filename = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{model_name}_indices_{str(out_indices)}_fourier_{reals}_{config['input_size']}_{pooling_type}.npy"
+elif preprocessing == "srm":
+    output_filename = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{model_name}_indices_{str(out_indices)}_srm_{reals}_{config['input_size']}_{pooling_type}.npy"
 else:
     output_filename = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{model_name}_indices_{str(out_indices)}_{reals}_{config['input_size']}_{pooling_type}.npy"
 

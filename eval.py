@@ -1,10 +1,8 @@
 """
 MuFlow — Base evaluation script.
 
-Standard normalizing-flow evaluation pipeline. No projection layer, no SRM.
-For variants see:
-    - eval_proj.py  (+ projection layer / contrastive learning)
-    - eval_srm.py   (+ SRM noise-residual scorer)
+Standard normalizing-flow evaluation pipeline. No projection layer.
+For the projection-layer variant see eval_proj.py.
 """
 import argparse
 import os
@@ -53,8 +51,6 @@ def parse_args():
     parser.add_argument("--run_dir", type=str, required=True,
                         help="Directory of a training run (must contain best.pt, "
                              "thresholds.npz and run_config.yaml).")
-    parser.add_argument("--test", type=str, default=None,
-                        help="Optional test-set name override (passed to Dataset).")
     parser.add_argument("--on_celeba", action='store_true',
                         help="Use CelebA-HQ test dataloader (adds class 99 OOD Real).")
     parser.add_argument("--num_workers", type=int, default=4)
@@ -76,6 +72,11 @@ def parse_args():
     for k, v in saved.items():
         if not hasattr(args, k):
             setattr(args, k, v)
+
+    # Backward compat: old run_config.yaml files have use_fourier bool;
+    # new ones have a preprocessing string. Normalise to the latter.
+    if not hasattr(args, 'preprocessing') or args.preprocessing is None:
+        args.preprocessing = 'fourier' if getattr(args, 'use_fourier', 0) == 1 else 'none'
 
     # Resolve file paths relative to run_dir
     args.checkpoint     = os.path.join(args.run_dir, 'best.pt')
@@ -100,7 +101,7 @@ def build_val_data_loader(args, config):
         input_size=config["input_size"],
         is_train=True,
         is_val=True,
-        use_fourier=True if args.use_fourier == 1 else False,
+        preprocessing=args.preprocessing,
         use_augs=False,
     ).create_dataset()
 
@@ -120,42 +121,11 @@ def create_dataloader(args, config, opt):
 
     test_dataset = dataset.Dataset(
         dataset_name=args.data,
-        reals_name=args.reals,
-        test_name=args.test,
+        reals_name='celeba_hq',#args.reals,
         input_size=config["input_size"],
         is_train=False,
         is_val=False,
-        use_fourier=True if args.use_fourier == 1 else False,
-        use_augs=True if args.use_augs == 1 else False,
-        attack_type=attack_type,
-        attack_params=attack_params
-    ).create_dataset()
-
-    class_to_idx_ = test_dataset.class_to_idx
-
-    num_workers = getattr(args, 'num_workers', 4)
-    data_loader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=opt.batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        drop_last=False,
-    )
-    return data_loader, {v: k for k, v in class_to_idx_.items()}
-
-
-def create_dataloader_w_celeba(args, config, opt):
-    attack_type = getattr(opt, 'attack_type', 'none')
-    attack_params = getattr(opt, 'attack_params', {})
-
-    test_dataset = dataset.Dataset_celeba(
-        dataset_name=args.data,
-        reals_name=args.reals,
-        test_name=args.test,
-        input_size=config["input_size"],
-        is_train=False,
-        is_val=False,
-        use_fourier=True if args.use_fourier == 1 else False,
+        preprocessing=args.preprocessing,
         use_augs=True if args.use_augs == 1 else False,
         attack_type=attack_type,
         attack_params=attack_params
@@ -184,8 +154,10 @@ def build_model(config, args):
     pooling_type = getattr(args, 'pooling_type', config.get('pooling_type', 'mean'))
     n_components = getattr(args, 'n_components', config.get('gmm_n_components', 1))
 
-    if args.use_fourier == 1:
+    if args.preprocessing == "fourier":
         gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}_{pooling_type}.npy"
+    elif args.preprocessing == "srm":
+        gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_srm_{args.reals}_{config['input_size']}_{pooling_type}.npy"
     else:
         gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
 
@@ -199,7 +171,7 @@ def build_model(config, args):
         conv3x3_only=config["conv3x3_only"],
         hidden_ratio=config["hidden_ratio"],
         gmm_values=gmm_values,
-        in_channels=1 if args.use_fourier == 1 else 3,
+        in_channels=3,
         backbone_weights=args.backbone_weights if hasattr(args, 'backbone_weights') and args.backbone_weights else None,
         out_indices=out_indices,
         pooling_type=pooling_type,
@@ -292,11 +264,11 @@ def collect_custom_images(path_or_glob):
 class CustomImageDataset(torch.utils.data.Dataset):
     """Minimal dataset wrapping arbitrary image paths with a fixed class label."""
 
-    def __init__(self, image_paths, labels, input_size, use_fourier=False):
+    def __init__(self, image_paths, labels, input_size, preprocessing="none"):
         self.image_paths = image_paths
         self.labels = labels
         self.transform = dataset.create_image_transform(
-            input_size, use_fourier=use_fourier, is_train=False, use_augs=False
+            input_size, preprocessing=preprocessing, is_train=False, use_augs=False
         )
 
     def __len__(self):
@@ -337,7 +309,7 @@ def create_custom_dataloader(args, config):
         image_paths=all_paths,
         labels=all_group_ids,
         input_size=config["input_size"],
-        use_fourier=args.use_fourier == 1,
+        preprocessing=args.preprocessing,
     )
     loader = torch.utils.data.DataLoader(
         ds, batch_size=64, shuffle=False,
@@ -632,10 +604,7 @@ def evaluate(args):
         print(f"Attack: {attack_type} {attack_params}")
         print(f"{'='*60}\n")
 
-        if not args.on_celeba:
-            test_dataloader, class2idx = create_dataloader(args, config, opt)
-        else:
-            test_dataloader, class2idx = create_dataloader_w_celeba(args, config, opt)
+        test_dataloader, class2idx = create_dataloader(args, config, opt)
 
         eval_once(test_dataloader, model,
                   class2idx=class2idx, threshold_info=threshold_info)
