@@ -12,11 +12,11 @@ import argparse
 from sklearn.manifold import TSNE
 from sklearn.mixture import GaussianMixture
 from muflow import constants as const
-from muflow.fourier_utils import calculate_fourier_magnitude_rgb
-from muflow.srm_utils import calculate_srm_residuals
 from tqdm import tqdm
 import pdb
 
+PREFIX = "aligned_"
+MEANS_DIR = os.path.join(const.DATA_DIR, "aligned_means", "500")
 
 # === Argument Parser ===
 parser = argparse.ArgumentParser(description='Generate GMM parameters for FastFlow')
@@ -30,14 +30,7 @@ reals       = args.reals
 
 config_path = f"{const.WORKING_DIR}/configs/{model_name}.yaml"
 config = yaml.safe_load(open(config_path, "r"))
-use_fourier = config.get("use_fourier", False)  # legacy compat
-preprocessing = config.get("preprocessing", "fourier" if use_fourier else "none")
-
-if preprocessing in ("fourier", "srm") and model_name in (const.DINO_BACKBONES + const.CLIP_BACKBONES):
-    raise ValueError(f"preprocessing='{preprocessing}' is not supported for DINOv2 / CLIP backbones (they require plain RGB input).")
-
 print("Model config: ", config)
-print(f"Preprocessing: {preprocessing}")
 print(f"Reals dataset: {reals}")
 
 # === Model Setup ===
@@ -98,7 +91,7 @@ def get_features(img, apply_normalization=False):
     Extract features from an image array.
 
     Args:
-        img: numpy array (RGB uint8 or Fourier float32)
+        img: numpy array (RGB uint8)
         apply_normalization: if True normalise with ImageNet stats (RGB only)
     Returns:
         list of feature tensors (one per layer / block)
@@ -149,34 +142,17 @@ def get_features(img, apply_normalization=False):
         else:  # cnn
             return model(img_t)
             x = x + model.pos_embed
-def get_features_from_path(path, preprocessing="none"):
-    """
-    Load image from path and extract features.
-
-    Args:
-        path        : Path to image file.
-        preprocessing: One of 'none', 'fourier', 'srm'.
-
-    Returns:
-        features: Extracted features from the model.
-    """
+def get_features_from_path(path):
+    """Load image from path and extract features."""
     img = np.array(Image.open(path).convert("RGB").resize([config['input_size'], config['input_size']]))
-
-    if preprocessing == "fourier":
-        img = calculate_fourier_magnitude_rgb(img)
-    elif preprocessing == "srm":
-        img = calculate_srm_residuals(img, seed=0)
-
-    features = get_features(img, apply_normalization=(preprocessing == "none"))
-    return features
+    return get_features(img, apply_normalization=True)
 
 
-common_path = "/media/orazio_mattia_group/ad4dd/WILD_means/500"
-generators = os.listdir(common_path)
+generators = os.listdir(MEANS_DIR)
 
 patterns_means = {}
 for gen in generators:
-    patterns_means[gen] = os.path.join(common_path, gen, '*.png')
+    patterns_means[gen] = os.path.join(MEANS_DIR, gen, '*.png')
 
 # Select real samples based on reals parameter
 if reals == 'ffhq':
@@ -187,13 +163,11 @@ else:
     real_sample = glob(patterns_means['ffhq']) + glob(patterns_means['celeba_hq'])
 
 print(f"Number of real samples: {len(real_sample)}")
-print(f"Extracting features (preprocessing: {preprocessing})...")
+print("Extracting features...")
 
 real_features = []
 for i, img_path in tqdm(enumerate(real_sample), total=len(real_sample)):
-    
-    # Extract features (with or without Fourier transform)
-    features = get_features_from_path(img_path, preprocessing=preprocessing)
+    features = get_features_from_path(img_path)
     feats_ = []
     for feats in features:
         if pooling_type == 'mean':
@@ -244,12 +218,7 @@ for i in range(num_layers):
     
     gmm["real"].append([clf.means_, clf.covariances_])
 
-if preprocessing == "fourier":
-    output_filename = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{model_name}_indices_{str(out_indices)}_fourier_{reals}_{config['input_size']}_{pooling_type}.npy"
-elif preprocessing == "srm":
-    output_filename = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{model_name}_indices_{str(out_indices)}_srm_{reals}_{config['input_size']}_{pooling_type}.npy"
-else:
-    output_filename = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{model_name}_indices_{str(out_indices)}_{reals}_{config['input_size']}_{pooling_type}.npy"
+output_filename = f"{const.WORKING_DIR}/parameters/{PREFIX}{n_components}-gmm_parameters_{model_name}_indices_{str(out_indices)}_{reals}_{config['input_size']}_{pooling_type}.npy"
 
 print(f"\nSaving GMM parameters to: {output_filename}")
 np.save(output_filename, gmm)

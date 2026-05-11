@@ -1,8 +1,9 @@
 """
-MuFlow — Base evaluation script.
+MuFlow — Evaluation script.
 
-Standard normalizing-flow evaluation pipeline. No projection layer.
-For the projection-layer variant see eval_proj.py.
+Normalizing-flow evaluation pipeline for one-class deepfake detection.
+Shared logic (eval_once, build_model, compute_threshold, …) is imported
+directly from main.py to avoid duplication.
 """
 import argparse
 import os
@@ -11,33 +12,25 @@ import torch
 import yaml
 import joblib
 import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
 from scipy.stats import norm
 from tqdm import tqdm
-
 from PIL import Image
 
 from muflow import constants as const
 from muflow import dataset
-from muflow import model as fastflow
 
-from sklearn.metrics import accuracy_score, average_precision_score, roc_auc_score
-from sklearn.neighbors import LocalOutlierFactor
-from joblib import Parallel, delayed
-import time
-
-GANS = [
-    'StyleGAN',
-    'StyleGAN2',
-    'StyleGAN3',
-    'STARGAN',
-    'AttGAN',
-    'GDWCT']
-DM_OPEN = ['Flux.1', 'Stable DIffusion 3.5', 'Stable Diffusion XL', 'Stable Cascade', 'Stable Diffusion Attend and Excite']
-DM_CLOSED = ['Dall-E 3', 'Midjourney', 'Starry AI', 'Deep AI', 'Hotpot AI', 'Nvidia Sana PAG', 'Tencent Hunyuan', 'Flux.1.1 Pro']
-
-MIX_2CLASS = ['STARGAN', 'StyleGAN2', 'Stable DIffusion 3.5', 'Flux.1.1 Pro']
+# ── Shared evaluation logic ──────────────────────────────────────────────────
+from main import (
+    eval_once,
+    _compute_class_metrics,
+    _aggregate_by_family,
+    _print_family_summary,
+    build_model,
+    compute_threshold,
+    build_val_data_loader,
+    build_test_data_loader,
+    GANS, DM_OPEN, DM_CLOSED, MIX_2CLASS,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -51,8 +44,6 @@ def parse_args():
     parser.add_argument("--run_dir", type=str, required=True,
                         help="Directory of a training run (must contain best.pt, "
                              "thresholds.npz and run_config.yaml).")
-    parser.add_argument("--on_celeba", action='store_true',
-                        help="Use CelebA-HQ test dataloader (adds class 99 OOD Real).")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--custom_dirs", type=str, nargs='+', default=None,
                         help="One or more folder paths or glob patterns containing images to evaluate "
@@ -73,10 +64,8 @@ def parse_args():
         if not hasattr(args, k):
             setattr(args, k, v)
 
-    # Backward compat: old run_config.yaml files have use_fourier bool;
-    # new ones have a preprocessing string. Normalise to the latter.
-    if not hasattr(args, 'preprocessing') or args.preprocessing is None:
-        args.preprocessing = 'fourier' if getattr(args, 'use_fourier', 0) == 1 else 'none'
+    # Auto-detect align_mode from DATA_DIR (overrides any value in run_config.yaml)
+    args.align_mode = 'aligned' in dataset.DATA_DIR
 
     # Resolve file paths relative to run_dir
     args.checkpoint     = os.path.join(args.run_dir, 'best.pt')
@@ -90,48 +79,23 @@ def parse_args():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Data loaders
+# Eval-specific data loaders
 # ═══════════════════════════════════════════════════════════════════════════
 
-def build_val_data_loader(args, config):
-    """Build validation dataloader (real images only, same split used during training)."""
-    val_dataset = dataset.Dataset(
-        dataset_name=args.data,
-        reals_name=args.reals,
-        input_size=config["input_size"],
-        is_train=True,
-        is_val=True,
-        preprocessing=args.preprocessing,
-        use_augs=False,
-    ).create_dataset()
-
-    return torch.utils.data.DataLoader(
-        val_dataset,
-        batch_size=64,
-        shuffle=False,
-        num_workers=args.num_workers,
-        drop_last=False,
-        pin_memory=True,
-    )
-
-
 def create_dataloader(args, config, opt):
-    attack_type = getattr(opt, 'attack_type', 'none')
+    attack_type   = getattr(opt, 'attack_type', 'none')
     attack_params = getattr(opt, 'attack_params', {})
 
     test_dataset = dataset.Dataset(
         dataset_name=args.data,
-        reals_name='celeba_hq',#args.reals,
+        reals_name=args.reals,
         input_size=config["input_size"],
         is_train=False,
         is_val=False,
-        preprocessing=args.preprocessing,
-        use_augs=True if args.use_augs == 1 else False,
+        use_augs=True if getattr(args, 'use_augs', False) else False,
         attack_type=attack_type,
         attack_params=attack_params
     ).create_dataset()
-
-    class_to_idx_ = test_dataset.class_to_idx
 
     num_workers = getattr(args, 'num_workers', 4)
     data_loader = torch.utils.data.DataLoader(
@@ -141,89 +105,30 @@ def create_dataloader(args, config, opt):
         num_workers=num_workers,
         drop_last=False,
     )
-    return data_loader, {v: k for k, v in class_to_idx_.items()}
+    return data_loader, {v: k for k, v in test_dataset.class_to_idx.items()}
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Model
-# ═══════════════════════════════════════════════════════════════════════════
-
-def build_model(config, args):
-    out_indices = config.get("out_indices", [1, 2, 3])
-    out_indices_str = str(out_indices)
-    pooling_type = getattr(args, 'pooling_type', config.get('pooling_type', 'mean'))
-    n_components = getattr(args, 'n_components', config.get('gmm_n_components', 1))
-
-    if args.preprocessing == "fourier":
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}_{pooling_type}.npy"
-    elif args.preprocessing == "srm":
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_srm_{args.reals}_{config['input_size']}_{pooling_type}.npy"
-    else:
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
-
-    gmm_values = np.load(gmm_parameters, allow_pickle=True).item()
-    print(f"Loading GMM parameters from {gmm_parameters}")
-
-    model = fastflow.FastFlow(
-        backbone_name=config["backbone_name"],
-        flow_steps=config["flow_step"],
+def build_aligned_test_dataloader(args, config, attack_type='none', attack_params=None):
+    """Reads pre-aligned images using the current dataset.DATA_DIR and CSV_PATH."""
+    num_workers = getattr(args, 'num_workers', 4)
+    aligned_ds = dataset.DeepFakeDataset(
+        file_pattern="**/*.*g",
         input_size=config["input_size"],
-        conv3x3_only=config["conv3x3_only"],
-        hidden_ratio=config["hidden_ratio"],
-        gmm_values=gmm_values,
-        in_channels=3,
-        backbone_weights=args.backbone_weights if hasattr(args, 'backbone_weights') and args.backbone_weights else None,
-        out_indices=out_indices,
-        pooling_type=pooling_type,
-        use_proj_layer=False,
-        proj_hidden_ratio=0.5,
+        is_train=False,
+        is_val=False,
+        reals_name=args.reals,
+        use_augs=False,
+        attack_type=attack_type,
+        attack_params=attack_params or {},
     )
-    print(f"Model A.D. Param#: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    return model
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Threshold
-# ═══════════════════════════════════════════════════════════════════════════
-
-def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto', alpha=0.1):
-    """Compute anomaly-detection threshold from the validation set (real images)."""
-    model.eval()
-    loss_values = []
-    device = next(model.nf_flows[0].parameters()).device
-
-    for batch in val_dataloader:
-        if isinstance(batch, (list, tuple)) and len(batch) == 2:
-            data, _ = batch
-        else:
-            data = batch
-        data = data.to(device)
-        with torch.no_grad():
-            ret = model(data)
-            loss_values.append(ret["loss"].cpu())
-
-    if not loss_values:
-        raise ValueError("No validation samples found. Check val dataloader.")
-
-    losses = torch.cat(loss_values).numpy()
-    mean, std = float(losses.mean()), float(losses.std())
-
-    result = {'threshold': None, 'mean': mean, 'std': std, 'losses': losses}
-
-    if use_lof:
-        lof = LocalOutlierFactor(novelty=True, contamination=contamination, n_jobs=-1)
-        lof.fit(losses.reshape(-1, 1))
-        result['lof'] = lof
-    else:
-        z = norm.ppf(1 - alpha)
-        result['l_threshold'] = float(mean - z * std)
-        result['u_threshold'] = float(mean + z * std)
-
-    l = result.get('l_threshold')
-    u = result.get('u_threshold')
-    bounds = f"[{l:.4f}, {u:.4f}]" if l is not None else "(LOF)"
-    print(f"Threshold computation done.  mean={mean:.4f}  std={std:.4f}  {bounds}")
-    return result
+    return torch.utils.data.DataLoader(
+        aligned_ds,
+        batch_size=64,
+        shuffle=False,
+        num_workers=num_workers,
+        drop_last=False,
+        pin_memory=True,
+    ), {v: k for k, v in aligned_ds.class_to_idx.items()}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -231,7 +136,6 @@ def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto'
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _dir_name_from_path(path_or_glob):
-    """Return a human-readable name from a plain path or a glob pattern."""
     parts = path_or_glob.replace('\\', '/').rstrip('/').split('/')
     for part in reversed(parts):
         if part and '*' not in part and '?' not in part:
@@ -240,9 +144,8 @@ def _dir_name_from_path(path_or_glob):
 
 
 def collect_custom_images(path_or_glob):
-    """Collect image paths from a directory or a glob pattern (png/jpg/jpeg)."""
     valid_ext = {'.png', '.jpg', '.jpeg'}
-    img_exts = ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']
+    img_exts  = ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']
 
     if os.path.isdir(path_or_glob):
         paths = []
@@ -262,13 +165,11 @@ def collect_custom_images(path_or_glob):
 
 
 class CustomImageDataset(torch.utils.data.Dataset):
-    """Minimal dataset wrapping arbitrary image paths with a fixed class label."""
-
-    def __init__(self, image_paths, labels, input_size, preprocessing="none"):
+    def __init__(self, image_paths, labels, input_size):
         self.image_paths = image_paths
-        self.labels = labels
-        self.transform = dataset.create_image_transform(
-            input_size, preprocessing=preprocessing, is_train=False, use_augs=False
+        self.labels      = labels
+        self.transform   = dataset.create_image_transform(
+            input_size, is_train=False, use_augs=False
         )
 
     def __len__(self):
@@ -282,16 +183,13 @@ class CustomImageDataset(torch.utils.data.Dataset):
 def create_custom_dataloader(args, config):
     if args.custom_labels is None or len(args.custom_labels) != len(args.custom_dirs):
         raise ValueError(
-            "--custom_labels must be provided and have the same length as --custom_dirs."
-        )
+            "--custom_labels must be provided and have the same length as --custom_dirs.")
 
-    all_paths, all_group_ids = [], []
-    groups = []
-
+    all_paths, all_group_ids, groups = [], [], []
     for gid, (d, lbl) in enumerate(zip(args.custom_dirs, args.custom_labels)):
         if lbl not in (0, 1):
             raise ValueError(f"--custom_labels must be 0 or 1, got {lbl} for dir '{d}'.")
-        name = _dir_name_from_path(d)
+        name  = _dir_name_from_path(d)
         paths = collect_custom_images(d)
         if not paths:
             print(f"[warn] No images found: {d}")
@@ -299,28 +197,20 @@ def create_custom_dataloader(args, config):
         groups.append({'name': name, 'expected_label': lbl, 'group_id': gid, 'n': len(paths)})
         all_paths.extend(paths)
         all_group_ids.extend([gid] * len(paths))
-        label_str = 'real (0)' if lbl == 0 else 'fake (1)'
-        print(f"  [{gid}] {name}  → {label_str}: {len(paths)} images")
+        print(f"  [{gid}] {name}  → {'real(0)' if lbl == 0 else 'fake(1)'}: {len(paths)} images")
 
     if not all_paths:
         raise ValueError("No images found in any of the provided custom dirs.")
 
-    ds = CustomImageDataset(
-        image_paths=all_paths,
-        labels=all_group_ids,
-        input_size=config["input_size"],
-        preprocessing=args.preprocessing,
-    )
+    ds = CustomImageDataset(all_paths, all_group_ids, config["input_size"])
     loader = torch.utils.data.DataLoader(
         ds, batch_size=64, shuffle=False,
-        num_workers=getattr(args, 'num_workers', 4),
-        drop_last=False,
+        num_workers=getattr(args, 'num_workers', 4), drop_last=False,
     )
     return loader, groups
 
 
 def eval_custom(dataloader, model, groups, threshold_info):
-    """Accuracy-only evaluation for custom dirs."""
     model.eval()
     preds_list, group_ids_list = [], []
     device = next(model.nf_flows[0].parameters()).device
@@ -332,181 +222,34 @@ def eval_custom(dataloader, model, groups, threshold_info):
         preds_list.append(ret["loss"].cpu())
         group_ids_list.append(gids)
 
-    scores = torch.cat(preds_list).numpy()
+    scores   = torch.cat(preds_list).numpy()
     group_ids = torch.cat(group_ids_list).numpy()
 
     if 'lof' in threshold_info:
         binary_preds = (threshold_info['lof'].predict(scores.reshape(-1, 1)) < 0).astype(int)
     elif 'l_threshold' in threshold_info and 'u_threshold' in threshold_info:
-        binary_preds = (
-            (scores < threshold_info['l_threshold']) |
-            (scores > threshold_info['u_threshold'])
-        ).astype(int)
+        binary_preds = ((scores < threshold_info['l_threshold']) |
+                        (scores > threshold_info['u_threshold'])).astype(int)
     elif 'threshold' in threshold_info and threshold_info['threshold'] is not None:
         binary_preds = (scores > threshold_info['threshold']).astype(int)
     else:
-        raise ValueError("threshold_info must contain 'l_threshold'/'u_threshold', 'threshold', or 'lof'.")
+        raise ValueError("threshold_info must contain thresholds or 'lof'.")
 
     print("\nCustom-dirs evaluation results")
     print("=" * 50)
     for g in groups:
-        gid = g['group_id']
+        gid      = g['group_id']
         expected = g['expected_label']
-        mask = group_ids == gid
+        mask     = group_ids == gid
         if mask.sum() == 0:
             continue
         g_scores = scores[mask]
         g_preds  = binary_preds[mask]
         acc = (g_preds == expected).mean()
         print(f"  [{g['name']}]  expected={'real(0)' if expected == 0 else 'fake(1)'}  "
-              f"N={mask.sum()}  "
-              f"Accuracy={acc:.4f}  "
-              f"Score={g_scores.mean():.4f}\u00b1{g_scores.std():.4f}")
+              f"N={mask.sum()}  Accuracy={acc:.4f}  "
+              f"Score={g_scores.mean():.4f}±{g_scores.std():.4f}")
     print("=" * 50)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Evaluation
-# ═══════════════════════════════════════════════════════════════════════════
-
-def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx, y_true_0_base, y_pred_0_base):
-    """Compute balanced binary metrics for one fake class vs the real baseline."""
-    mask_c = class_masks[c]
-    y_true_c = labels[mask_c]
-    y_pred_c = preds[mask_c]
-    preds_c = preds_[mask_c]
-
-    min_len = min(len(y_true_c), len(y_true_0_base))
-    if min_len == 0:
-        return None
-
-    class_name = class2idx[c] if class2idx else str(c)
-    rng = np.random.RandomState(42 + c)
-    idx = rng.permutation(len(y_true_0_base))
-    y_pred_0_shuffled = y_pred_0_base[idx]
-
-    y_pred_balanced = np.concatenate([y_pred_c[:min_len], y_pred_0_shuffled[:min_len]])
-    y_true_binary = np.concatenate([np.ones(min_len, dtype=np.int8), np.zeros(min_len, dtype=np.int8)])
-
-    return {
-        'class_id': c,
-        'class_name': class_name,
-        'min_len': min_len,
-        'loss_mean': float(preds_c.mean()),
-        'loss_std': float(preds_c.std()),
-        'accuracy': accuracy_score(y_true_binary, y_pred_balanced),
-        'ap': average_precision_score(y_true_binary, y_pred_balanced),
-        'roc': roc_auc_score(y_true_binary, y_pred_balanced),
-    }
-
-
-def eval_once(dataloader, model, class2idx=None, threshold_info=None):
-    model.eval()
-    labels_list = []
-    preds_list = []
-    device = next(model.nf_flows[0].parameters()).device
-
-    for data, targets in dataloader:
-        data, targets = data.to(device), targets.to(device)
-        with torch.no_grad():
-            ret = model(data)
-        preds_list.append(ret["loss"].cpu())
-        labels_list.append(targets.cpu())
-
-    preds_ = torch.cat(preds_list, dim=0).numpy()
-    labels = torch.cat(labels_list, dim=0).numpy()
-
-    print("Testing done")
-
-    if threshold_info is None:
-        raise ValueError("threshold_info must be provided.")
-
-    if 'lof' in threshold_info:
-        preds = (threshold_info['lof'].predict(preds_.reshape(-1, 1)) < 0).astype(int)
-    elif 'l_threshold' in threshold_info and 'u_threshold' in threshold_info:
-        preds = ((preds_ < threshold_info['l_threshold']) | (preds_ > threshold_info['u_threshold'])).astype(int)
-    elif 'threshold' in threshold_info and threshold_info['threshold'] is not None:
-        preds = (preds_ > threshold_info['threshold']).astype(int)
-    else:
-        raise ValueError("threshold_info must contain 'l_threshold'/'u_threshold', 'threshold', or 'lof'.")
-
-    classes = np.unique(labels)
-    class_masks = {c: labels == c for c in classes}
-
-    # --- Real class (0) ---
-    mask_0 = class_masks[0]
-    preds_0_scores = preds_[mask_0]
-    acc_real = accuracy_score(np.zeros(mask_0.sum(), dtype=np.int8), preds[mask_0])
-    print(f"Accuracy Real (class 0): {acc_real:.4f}  "
-          f"Score = {preds_0_scores.mean():.4f}\u00b1{preds_0_scores.std():.4f}")
-
-    # --- OOD Real (class 99, e.g. CelebA-HQ) ---
-    if 99 in class_masks:
-        mask_99 = class_masks[99]
-        preds_99 = preds_[mask_99]
-        acc_ood = accuracy_score(np.zeros(mask_99.sum(), dtype=np.int8), preds[mask_99])
-        ood_name = class2idx.get(99, "OOD_Real") if class2idx else "OOD_Real"
-        print("-" * 30)
-        print(f"Accuracy OOD Real ({ood_name}): {acc_ood:.4f}  "
-              f"Score = {preds_99.mean():.4f}\u00b1{preds_99.std():.4f}")
-        print("-" * 30)
-
-    # --- Per-class metrics (balanced vs Real baseline) ---
-    classes_to_process = [c for c in classes if c != 0 and c != 99]
-    y_true_0 = labels[mask_0]
-    y_pred_0 = preds[mask_0]
-
-    print("\nPer-class metrics (vs Real baseline):")
-    print("=" * 30)
-
-    results = Parallel(n_jobs=-1, backend='threading')(
-        delayed(_compute_class_metrics)(
-            c, class_masks, labels, preds, preds_, class2idx, y_true_0, y_pred_0
-        ) for c in classes_to_process
-    )
-
-    aps, accs, rocs = [], [], []
-    aps_gan, accs_gan, rocs_gan = [], [], []
-    aps_dmo, accs_dmo, rocs_dmo = [], [], []
-    aps_dmc, accs_dmc, rocs_dmc = [], [], []
-    aps_mix, accs_mix, rocs_mix = [], [], []
-
-    for result in results:
-        if result is None:
-            continue
-        cname = result['class_name']
-        print(f"  > {cname} (N={result['min_len']*2}):  "
-              f"Acc={result['accuracy']:.4f}  AP={result['ap']:.4f}  "
-              f"ROC={result['roc']:.4f}  Score={result['loss_mean']:.4f}\u00b1{result['loss_std']:.4f}")
-        print("-" * 30)
-
-        aps.append(result['ap'])
-        accs.append(result['accuracy'])
-        rocs.append(result['roc'])
-
-        if cname in GANS:
-            aps_gan.append(result['ap']); accs_gan.append(result['accuracy']); rocs_gan.append(result['roc'])
-        if cname in DM_OPEN:
-            aps_dmo.append(result['ap']); accs_dmo.append(result['accuracy']); rocs_dmo.append(result['roc'])
-        if cname in DM_CLOSED:
-            aps_dmc.append(result['ap']); accs_dmc.append(result['accuracy']); rocs_dmc.append(result['roc'])
-        if cname in MIX_2CLASS:
-            aps_mix.append(result['ap']); accs_mix.append(result['accuracy']); rocs_mix.append(result['roc'])
-
-    print("=" * 30)
-    print(f"Mean Accuracy : {np.mean(accs):.4f}")
-    print(f"Mean AP       : {np.mean(aps):.4f}")
-    print(f"Mean ROC AUC  : {np.mean(rocs):.4f}")
-    print("\n--- Results by family ---")
-    if aps_gan:
-        print(f"  GANs     :  Acc={np.mean(accs_gan):.4f}  AP={np.mean(aps_gan):.4f}  ROC={np.mean(rocs_gan):.4f}")
-    if aps_dmo:
-        print(f"  DM-Open  :  Acc={np.mean(accs_dmo):.4f}  AP={np.mean(aps_dmo):.4f}  ROC={np.mean(rocs_dmo):.4f}")
-    if aps_dmc:
-        print(f"  DM-Closed:  Acc={np.mean(accs_dmc):.4f}  AP={np.mean(aps_dmc):.4f}  ROC={np.mean(rocs_dmc):.4f}")
-    if aps_mix:
-        print(f"  Mix      :  Acc={np.mean(accs_mix):.4f}  AP={np.mean(aps_mix):.4f}  ROC={np.mean(rocs_mix):.4f}")
-    print("=" * 30 + "\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -514,97 +257,93 @@ def eval_once(dataloader, model, class2idx=None, threshold_info=None):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def evaluate(args):
-    config = yaml.safe_load(open(args.config, "r"))
+    config     = yaml.safe_load(open(args.config, "r"))
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
 
     model = build_model(config, args)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.cuda()
 
-    # ── Threshold: load from file if available, else compute on val set ──
+    # ── Threshold ────────────────────────────────────────────────────────────
     threshold_info = None
-
     if os.path.exists(args.threshold_path):
-        threshold_path = args.threshold_path
-        if threshold_path.endswith('.npz'):
-            loaded = np.load(threshold_path, allow_pickle=True)
-            threshold_info = {key: loaded[key] for key in loaded.files}
-            for scalar_key in ('threshold', 'l_threshold', 'u_threshold', 'mean', 'std'):
-                if scalar_key in threshold_info and isinstance(threshold_info[scalar_key], np.ndarray):
-                    if threshold_info[scalar_key].size == 1:
-                        threshold_info[scalar_key] = float(threshold_info[scalar_key])
+        if args.threshold_path.endswith('.npz'):
+            loaded = np.load(args.threshold_path, allow_pickle=True)
+            threshold_info = {k: loaded[k] for k in loaded.files}
+            for sk in ('threshold', 'l_threshold', 'u_threshold', 'mean', 'std'):
+                if sk in threshold_info and isinstance(threshold_info[sk], np.ndarray):
+                    if threshold_info[sk].size == 1:
+                        threshold_info[sk] = float(threshold_info[sk])
         else:
-            threshold_data = np.load(threshold_path, allow_pickle=True)
-            if isinstance(threshold_data, np.ndarray) and threshold_data.dtype == object:
-                threshold_info = threshold_data.item()
-            else:
-                threshold_info = {
-                    'mean': float(threshold_data[0]),
-                    'std': float(threshold_data[1]),
-                    'l_threshold': float(threshold_data[0]) - 3 * float(threshold_data[1]),
-                    'u_threshold': float(threshold_data[0]) + 3 * float(threshold_data[1]),
-                }
-        print(f"Threshold loaded from {threshold_path}")
+            td = np.load(args.threshold_path, allow_pickle=True)
+            threshold_info = td.item() if (isinstance(td, np.ndarray) and td.dtype == object) else {
+                'mean': float(td[0]), 'std': float(td[1]),
+                'l_threshold': float(td[0]) - 3 * float(td[1]),
+                'u_threshold': float(td[0]) + 3 * float(td[1]),
+            }
+        print(f"Threshold loaded from {args.threshold_path}")
     else:
         print("Computing threshold on validation set...")
         val_dataloader = build_val_data_loader(args, config)
         threshold_info = compute_threshold(
             val_dataloader, model,
-            use_lof=args.use_lof == 1,
+            use_lof=bool(getattr(args, 'use_lof', False)),
             contamination=args.contamination,
             alpha=args.alpha,
         )
 
-    # --- LOF: load from file if available ---
-    lof_checkpoint = args.lof_checkpoint
-    if args.use_lof == 1 and os.path.exists(lof_checkpoint):
-        threshold_info['lof'] = joblib.load(lof_checkpoint)
-        print(f"Loaded LOF model from {lof_checkpoint}")
+    if getattr(args, 'use_lof', False) and os.path.exists(args.lof_checkpoint):
+        threshold_info['lof'] = joblib.load(args.lof_checkpoint)
+        print(f"Loaded LOF model from {args.lof_checkpoint}")
 
-    # ── Custom-dirs evaluation mode ──
+    # ── Custom-dirs mode ─────────────────────────────────────────────────────
     if args.custom_dirs is not None:
-        print(f"\n{'='*60}")
-        print("Custom dirs evaluation")
-        print(f"{'='*60}")
+        print(f"\n{'='*60}\nCustom dirs evaluation\n{'='*60}")
         custom_loader, groups = create_custom_dataloader(args, config)
         eval_custom(custom_loader, model, groups, threshold_info)
         return
 
+    # ── Standard eval with optional attacks ──────────────────────────────────
     attacks_configs = [
         ('none', {}),
-        ('jpeg', {'quality': 90}),
-        ('jpeg', {'quality': 80}),
-        ('jpeg', {'quality': 70}),
-        ('jpeg', {'quality': 60}),
-        ('jpeg', {'quality': 50}),
-        ('jpeg', {'quality': 40}),
-        ('jpeg', {'quality': 30}),
-        ('jpeg', {'quality': 20}),
-        ('gaussian_blur', {'kernel_size': 3, 'sigma': 1.0}),
-        ('gaussian_blur', {'kernel_size': 5, 'sigma': 2.0}),
-        ('rotation', {'angle': 30}),
-        ('rotation', {'angle': 180}),
-        ('gaussian_noise', {'mean': 0, 'std': 0.05}),
-        ('salt_pepper', {'amount': 0.02}),
-        ('resize', {'scale_factor': 0.5}),
-        ('horizontal_flip', {}),
+        # ('jpeg', {'quality': 90}),
+        # ('jpeg', {'quality': 80}),
+        # ('jpeg', {'quality': 70}),
+        # ('jpeg', {'quality': 60}),
+        # ('jpeg', {'quality': 50}),
+        # ('jpeg', {'quality': 40}),
+        # ('jpeg', {'quality': 30}),
+        # ('jpeg', {'quality': 20}),
+        # ('gaussian_blur', {'kernel_size': 3, 'sigma': 1.0}),
+        # ('gaussian_blur', {'kernel_size': 5, 'sigma': 2.0}),
+        # ('rotation', {'angle': 30}),
+        # ('rotation', {'angle': 180}),
+        # ('gaussian_noise', {'mean': 0, 'std': 0.05}),
+        # ('salt_pepper', {'amount': 0.02}),
+        # ('resize', {'scale_factor': 0.5}),
+        # ('horizontal_flip', {}),
+        # ('random_crop', {'crop_ratio': 0.95}),
     ]
 
+    mode_label = "aligned eval" if args.align_mode else "standard eval"
+
     for attack_type, attack_params in attacks_configs:
-        class Options:
-            isTrain = False
-            isVal = False
-            batch_size = 64
-
-        opt = Options()
-        opt.attack_type = attack_type
-        opt.attack_params = attack_params
-
         print(f"\n{'='*60}")
-        print(f"Attack: {attack_type} {attack_params}")
+        print(f"[{mode_label}]  Attack: {attack_type} {attack_params}")
         print(f"{'='*60}\n")
 
-        test_dataloader, class2idx = create_dataloader(args, config, opt)
+        if args.align_mode:
+            test_dataloader, class2idx = build_aligned_test_dataloader(
+                args, config, attack_type, attack_params)
+        else:
+            class Options:
+                isTrain = False
+                isVal   = False
+                batch_size = 64
+            opt = Options()
+            opt.attack_type   = attack_type
+            opt.attack_params = attack_params
+            test_dataloader, class2idx = create_dataloader(args, config, opt)
 
         eval_once(test_dataloader, model,
                   class2idx=class2idx, threshold_info=threshold_info)

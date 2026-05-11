@@ -12,20 +12,34 @@ def get_args():
     parser = argparse.ArgumentParser(description="Generate mean images for WILD and real datasets")
     parser.add_argument('--num_images', type=int, default=1000, help='Number of mean images to generate per class/folder')
     parser.add_argument('--mean_size', type=int, default=500, help='Number of images to average for each mean image')
+    parser.add_argument('--resize_means_dim', type=int, default=None, help='Dimension to resize mean images to (if None, no resizing)')
     parser.add_argument('--output_dir', type=str, default=None, help='Directory to save generated mean images')
-    parser.add_argument('--ff4all_glob', type=str, default=os.path.join(DATA_DIR, 'WILD', '**', '*'), help='Glob path for WILD folders')
-    parser.add_argument('--ff4all_base', type=str, default=os.path.join(DATA_DIR, 'WILD'), help='Base path for WILD images')
-    parser.add_argument('--datasets_dfx_glob', type=str, default=os.path.join(DATA_DIR, 'datasets_DFX', '*'), help='Glob path for datasets_DFX folders')
-    parser.add_argument('--datasets_dfx_base', type=str, default=os.path.join(DATA_DIR, 'datasets_DFX'), help='Base path for datasets_DFX images')
-    parser.add_argument('--celeba_hq_glob', type=str, default=os.path.join(DATA_DIR, 'celeba_hq', '**', '**', '*.jpg'), help='Glob path for CelebA-HQ dataset')
-    parser.add_argument('--ffhq_glob', type=str, default=os.path.join(DATA_DIR, 'ffhq', '*', '*.png'), help='Glob path for FFHQ real images')
-    parser.add_argument('--real_folders', type=str, nargs='+', default=['ffhq'], help='List of real folders to process')
+    parser.add_argument('--data_root', type=str, default=DATA_DIR,
+                        help='Root data directory. Override to use a different dataset, e.g. the '
+                             'pre-aligned dataset: --data_root /media/.../ad4dd/aligned')
+    parser.add_argument('--wild_glob', type=str, default=None, help='Override glob path for WILD folders')
+    parser.add_argument('--wild_base', type=str, default=None, help='Override base path for WILD images')
+    parser.add_argument('--datasets_dfx_glob', type=str, default=None, help='Override glob path for datasets_DFX folders')
+    parser.add_argument('--datasets_dfx_base', type=str, default=None, help='Override base path for datasets_DFX images')
+    parser.add_argument('--celeba_hq_glob', type=str, default=None, help='Override glob path for CelebA-HQ dataset')
+    parser.add_argument('--ffhq_glob', type=str, default=None, help='Override glob path for FFHQ real images')
+    parser.add_argument('--real_folders', type=str, nargs='+', default=['ffhq', 'celeba_hq'], help='List of real folders to process')
     parser.add_argument('--input_dir', type=str, default=None,
                         help='Optional: path to a folder OR glob pattern containing images (.png/.jpg/.jpeg) to process in generic mode')
     args = parser.parse_args()
 
+    # Resolve glob defaults from data_root (allows --data_root to change everything at once)
+    root = args.data_root
+    if args.wild_glob       is None: args.wild_glob       = os.path.join(root, 'WILD', '**', '*')
+    if args.wild_base       is None: args.wild_base       = os.path.join(root, 'WILD')
+    if args.datasets_dfx_glob is None: args.datasets_dfx_glob = os.path.join(root, 'datasets_DFX', '*')
+    if args.datasets_dfx_base is None: args.datasets_dfx_base = os.path.join(root, 'datasets_DFX')
+    if args.celeba_hq_glob    is None: args.celeba_hq_glob    = os.path.join(root, 'celeba_hq', '**', '**', '*.jpg')
+    if args.ffhq_glob         is None: args.ffhq_glob         = os.path.join(root, 'ffhq', '*', '*.png')
+
     if args.output_dir is None:
-        args.output_dir = os.path.join(DATA_DIR, f"WILD_means/{args.mean_size}/")
+        tag = 'aligned' if root != DATA_DIR else 'WILD'
+        args.output_dir = os.path.join(DATA_DIR, f"{tag}_means/{args.mean_size}/")
 
     return args
 
@@ -68,7 +82,7 @@ def generate_means_from_paths(pattern_list, save_dir, num_images, mean_size, res
     np.random.shuffle(pattern_list)
 
     if resize_to is None:
-        images = np.array([plt.imread(img) for img in pattern_list])
+        images = np.array([np.array(Image.open(img).convert('RGB')) for img in pattern_list])
     else:
         images = np.array([np.array(Image.open(img).convert('RGB').resize(resize_to)) for img in pattern_list])
 
@@ -112,11 +126,11 @@ def main():
             save_dir=generic_save_dir,
             num_images=num_images,
             mean_size=mean_size,
-            resize_to=(256, 256)
+            resize_to=args.resize_means_dim
         )
         return
 
-    ff4all_folders = glob.glob(args.ff4all_glob)
+    ff4all_folders = glob.glob(args.wild_glob)
     fake_folders = [fold.split('/')[-1] for fold in ff4all_folders if os.path.isdir(fold)]
     
     # Add datasets_DFX folders
@@ -132,7 +146,7 @@ def main():
             os.makedirs(os.path.join(output_dir, folder), exist_ok=True)
         try:
             # Try WILD path first
-            pattern = os.path.join(args.ff4all_base, '**', folder, '*.png')
+            pattern = os.path.join(args.wild_base, '**', folder, '*.png')
             pattern_list = np.unique(glob.glob(pattern, recursive=True))
             
             # If not found in WILD, try datasets_DFX
@@ -148,7 +162,7 @@ def main():
                 save_dir=os.path.join(output_dir, folder),
                 num_images=num_images,
                 mean_size=mean_size,
-                resize_to=None
+                resize_to=args.resize_means_dim
             )
         except Exception as e:
             print(f"Error processing folder '{folder}': {e}")
@@ -181,7 +195,7 @@ def main():
             save_dir=os.path.join(output_dir, folder),
             num_images=num_images,
             mean_size=mean_size,
-            resize_to=(256, 256)
+            resize_to=args.resize_means_dim
         )
 
 if __name__ == '__main__':

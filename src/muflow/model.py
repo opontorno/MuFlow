@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from muflow import constants as const
-from muflow.modules import ProjectionLayer
 
 import numpy as np
 
@@ -83,7 +82,7 @@ class CLIPVisualExtractor(nn.Module):
         return features
 
 
-def gaussian_nll_loss(output, mu, cov, log_jac_det):
+def gaussian_nll_loss(output, mu, cov, log_jac_det, pooling_type='mean'):
     
     B, d = output.shape
     
@@ -91,7 +90,9 @@ def gaussian_nll_loss(output, mu, cov, log_jac_det):
     diff = (output - mu).reshape(B, d, 1) # Shape: (B, d, 1)  TODO: controllare shape output
     mahalanobis = torch.matmul(diff.transpose(1, 2), torch.matmul(cov_inv, diff)).squeeze() # Mahalanobis distance: (x - mu)^T Σ^{-1} (x - mu)
 
-    loss = torch.log1p(0.5 * mahalanobis - log_jac_det)
+    loss = 0.5 * mahalanobis - log_jac_det
+    if pooling_type == 'flatten':
+        loss = torch.log1p(loss)
 
     return loss, mahalanobis
 
@@ -137,8 +138,7 @@ class FastFlow(nn.Module):
         in_channels=3,
         out_indices=[1, 2, 3],
         pooling_type='mean',
-        use_proj_layer=False,
-        proj_hidden_ratio=0.5,
+        align_aligner_mode: str = 'ffhq',
     ):
         super(FastFlow, self).__init__()
         assert (
@@ -218,19 +218,6 @@ class FastFlow(nn.Module):
         for param in self.feature_extractor.parameters():
             param.requires_grad = False
 
-        # Projection layers for contrastive learning
-        self.use_proj_layer = use_proj_layer
-        if self.use_proj_layer:
-            self.projection_layers = nn.ModuleList()
-            for in_channels in channels:
-                proj_layer = ProjectionLayer(
-                    in_channels=in_channels,
-                    hidden_ratio=proj_hidden_ratio
-                )
-                self.projection_layers.append(proj_layer)
-        else:
-            self.projection_layers = None
-
         self.nf_flows = nn.ModuleList()
         for in_channels, scale in zip(channels, scales):
             self.nf_flows.append(
@@ -241,8 +228,12 @@ class FastFlow(nn.Module):
                     flow_steps=flow_steps,
                 )
             )
-        self.input_size = input_size
+        self.input_size   = input_size
         self.pooling_type = pooling_type
+
+        # ── Alignment mode ────────────────────────────────────────────────
+        self._align_aligner_mode = align_aligner_mode
+        self._aligner          = None   # lazy-initialised on first predict() call
 
         gmm_values = gmm_values["real"]
         self.means = []
@@ -254,27 +245,8 @@ class FastFlow(nn.Module):
             self.covs.append(gmm_values[i][1])
         #self.covs = [np.expand_dims(np.eye(cov.shape[1]),axis=0) for cov in self.covs]
     
-    def process_features(self, features, use_projection=True):
-        """
-        Process features through optional modules (projection)
-        and normalizing flows.
-
-        Args:
-            features: List of feature tensors
-            use_projection: Whether to apply projection layers (default: True)
-
-        Returns:
-            Dictionary with 'loss' and 'mahalanobis'
-        """
-        # ----- Projection layers (contrastive mode) -----
-        projected_features = None
-        if self.use_proj_layer and use_projection and self.projection_layers is not None:
-            projected_features = []
-            for i, feature in enumerate(features):
-                proj_feat = self.projection_layers[i](feature)
-                projected_features.append(proj_feat)
-            features = projected_features
-
+    def process_features(self, features):
+        """Process features through normalizing flows."""
         # ----- Normalizing Flows -----
         loss = []
         mahalanobis = []
@@ -296,7 +268,7 @@ class FastFlow(nn.Module):
             else:
                 output = output.flatten(1)
 
-            loss_, maha_ = gaussian_nll_loss(output=output, mu=mu, cov=cov, log_jac_det=log_jac_det)
+            loss_, maha_ = gaussian_nll_loss(output=output, mu=mu, cov=cov, log_jac_det=log_jac_det, pooling_type=self.pooling_type)
             loss.append(loss_)
             mahalanobis.append(maha_)
 
@@ -308,13 +280,84 @@ class FastFlow(nn.Module):
         }
         return result
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # Alignment helpers & single-image predict()
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def _get_aligner(self):
+        if self._aligner is None:
+            from muflow.alignment import Aligner
+            output_size   = self.input_size if isinstance(self.input_size, int) \
+                            else self.input_size[0]
+            self._aligner = Aligner(mode=self._align_aligner_mode,
+                                    output_size=output_size)
+        return self._aligner
+
+    def predict(self, image, align: bool = False) -> dict:
+        """
+        Single-image inference with optional face alignment.
+
+        Applies the inference transform pipeline (Resize, ToTensor, Normalize)
+        (Resize → [align] → ToTensor → Normalize) and returns the anomaly
+        scores for the image.
+
+        Args:
+            image : PIL.Image.Image or np.ndarray (H×W×3 uint8 RGB)
+            align : if True, apply FFHQ-style face alignment before inference
+                    using the Aligner (face-alignment library + FAN).
+                    On detection failure the original image is used.
+
+        Returns:
+            dict with:
+                'loss'         (float) — anomaly score (higher = more likely fake)
+                'mahalanobis'  (float) — mean Mahalanobis distance across layers
+        """
+        from PIL import Image as _PIL
+        from muflow.dataset import create_image_transform
+
+        # ── Input normalisation ───────────────────────────────────────────
+        if isinstance(image, np.ndarray):
+            image = _PIL.fromarray(image.astype(np.uint8))
+        elif not isinstance(image, _PIL.Image):
+            raise TypeError(
+                f"image must be PIL.Image or np.ndarray, got {type(image).__name__}"
+            )
+
+        # ── Optional face alignment ───────────────────────────────────────
+        if align:
+            from muflow.alignment import FaceNotFoundError
+            try:
+                image = self._get_aligner().align(image)
+            except FaceNotFoundError as e:
+                print(f"[predict] WARNING: face not detected — skipping alignment. ({e})")
+
+        # ── Preprocessing (same as dataset pipeline) ──────────────────────
+        transform = create_image_transform(
+            self.input_size,
+            is_train=False,
+            use_augs=False,
+        )
+        tensor = transform(image).unsqueeze(0)   # (1, 3, H, W)
+
+        # ── Forward pass ──────────────────────────────────────────────────
+        device = next(self.nf_flows[0].parameters()).device
+        tensor = tensor.to(device)
+        self.eval()
+        with torch.no_grad():
+            ret = self.forward(tensor)
+
+        return {
+            'loss':        float(ret['loss'].item()),
+            'mahalanobis': float(ret['mahalanobis'].item()),
+        }
+
     def forward(self, x):
         """
         Forward pass.
-        
+
         Args:
             x: Input tensor
-        
+
         Returns:
             Dictionary with loss and mahalanobis distance
         """
@@ -376,29 +419,6 @@ class FastFlow(nn.Module):
             features = [self.norms[i](feature) for i, feature in enumerate(features)]
         
         return self.process_features(features)
-    
-    def freeze_projection_layers(self):
-        """Freeze projection layers for training FastFlow"""
-        if self.projection_layers is not None:
-            for proj_layer in self.projection_layers:
-                for param in proj_layer.parameters():
-                    param.requires_grad = False
-            print("Projection layers frozen")
-    
-    def unfreeze_projection_layers(self):
-        """Unfreeze projection layers for training them"""
-        if self.projection_layers is not None:
-            for proj_layer in self.projection_layers:
-                for param in proj_layer.parameters():
-                    param.requires_grad = True
-            print("Projection layers unfrozen")
-    
-    def freeze_fastflow(self):
-        """Freeze FastFlow (normalizing flows) for training projection layers"""
-        for nf_flow in self.nf_flows:
-            for param in nf_flow.parameters():
-                param.requires_grad = False
-        print("FastFlow frozen")
     
     def unfreeze_fastflow(self):
         """Unfreeze FastFlow for training"""

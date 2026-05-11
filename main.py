@@ -1,14 +1,13 @@
 """
-MuFlow — Base training script.
+MuFlow — Training script.
 
-Standard normalizing-flow training pipeline. No projection layer, no SRM.
-For variants see:
-    - main_proj.py  (+ projection layer / contrastive learning)
-    - main_proj.py  (+ projection head)
+Normalizing-flow training pipeline for one-class deepfake detection.
 """
 import argparse
 from pprint import pprint
 import os, pdb
+import json
+import shutil
 import subprocess
 import sys
 import time
@@ -31,9 +30,56 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import norm
 
-from sklearn.metrics import accuracy_score, average_precision_score, roc_auc_score
+from sklearn.metrics import accuracy_score, average_precision_score, roc_auc_score, roc_curve
 from sklearn.neighbors import LocalOutlierFactor
 from joblib import Parallel, delayed
+
+# ── Generator families ───────────────────────────────────────────────────────
+GANS      = {'StyleGAN', 'StyleGAN2', 'StyleGAN3', 'STARGAN', 'AttGAN', 'GDWCT'}
+DM_OPEN   = {'Flux.1', 'Stable DIffusion 3.5', 'Stable Diffusion XL',
+             'Stable Cascade', 'Stable Diffusion Attend and Excite'}
+DM_CLOSED = {'Dall-E 3', 'Midjourney', 'Starry AI', 'Deep AI', 'Hotpot AI',
+             'Nvidia Sana PAG', 'Tencent Hunyuan', 'Flux.1.1 Pro'}
+MIX_2CLASS = {'STARGAN', 'StyleGAN2', 'Stable DIffusion 3.5', 'Flux.1.1 Pro'}
+
+
+def _aggregate_by_family(results):
+    """Group per-class result dicts by generator family."""
+    fam = {'all': [], 'gan': [], 'dm_open': [], 'dm_closed': [], 'mix': []}
+    for r in results:
+        if r is None:
+            continue
+        n = r['class_name']
+        fam['all'].append(r)
+        if n in GANS:       fam['gan'].append(r)
+        if n in DM_OPEN:    fam['dm_open'].append(r)
+        if n in DM_CLOSED:  fam['dm_closed'].append(r)
+        if n in MIX_2CLASS: fam['mix'].append(r)
+    return fam
+
+
+def _print_family_summary(fam):
+    """Print mean metrics per family from _aggregate_by_family output."""
+    keys = ['accuracy', 'acc_oracle', 'acc_oracle_bi', 'ap', 'roc']
+
+    def _m(rs, k): return np.mean([r[k] for r in rs])
+
+    if not fam['all']:
+        return
+    print(f"Mean Accuracy : {_m(fam['all'], 'accuracy'):.4f}"
+          f" (oracle={_m(fam['all'], 'acc_oracle'):.4f},"
+          f" bi={_m(fam['all'], 'acc_oracle_bi'):.4f})")
+    print(f"Mean AP       : {_m(fam['all'], 'ap'):.4f}")
+    print(f"Mean ROC AUC  : {_m(fam['all'], 'roc'):.4f}")
+    print("--- by family ---")
+    for label, key in [('GANs', 'gan'), ('DM-Open', 'dm_open'),
+                       ('DM-Closed', 'dm_closed'), ('Mix', 'mix')]:
+        if fam[key]:
+            print(f"  {label:<10}: Acc={_m(fam[key], 'accuracy'):.4f}"
+                  f" (oracle={_m(fam[key], 'acc_oracle'):.4f},"
+                  f" bi={_m(fam[key], 'acc_oracle_bi'):.4f})"
+                  f"  AP={_m(fam[key], 'ap'):.4f}"
+                  f"  ROC={_m(fam[key], 'roc'):.4f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -49,7 +95,9 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, help="path to load checkpoint")
 
     parser.add_argument('--wandb', default='online', choices=['online', 'offline', 'disabled'])
-    parser.add_argument('--use_augs', type=int, default=0, choices=[0, 1], help="Whether to use data augmentation")
+    parser.add_argument('--use_augs', action='store_true', help="Enable non-geometric augmentations (ColorJitter, HFlip, GaussianBlur). "
+                             "RandomAffineAug (shift/scale/rotation) is always active during training.")
+    parser.add_argument('--affine_prob', type=float, default=0.5)
     parser.add_argument('--run_name', type=str)
     parser.add_argument('--eval_interval', type=int, default=1)
     parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
@@ -64,16 +112,17 @@ def parse_args():
     parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_epochs', type=int, default=1000)
-    parser.add_argument('--scheduler', type=int, default=1, choices=[0, 1], help="Whether to use scheduler")
-    parser.add_argument('--lr_decay', type=float, default=0.3)
+    parser.add_argument('--scheduler', action='store_true', default=True, help="Enable LR scheduler (default: on)")
+    parser.add_argument('--lr_decay', type=float, default=0.7)
     parser.add_argument('--lr_patience', type=int, default=35)
 
     # Model Hyperparameters
-    parser.add_argument('--alpha', type=float, default=0.01, help="Target false positive rate under the normality assumption")
-    parser.add_argument('--use_lof', type=int, default=0, choices=[0, 1], help="Whether to use LOF")
+    parser.add_argument('--alpha', type=float, default=0.1, help="Target false positive rate under the normality assumption")
+    parser.add_argument('--use_lof', action='store_true', default=False, help="Enable Local Outlier Factor threshold")
     parser.add_argument('--contamination', default='auto')
 
-    parser.add_argument('-patience', '--early_stopping_patience', type=float, default=float("inf"), help="Patience epochs for early stopping based on Val Acc")
+    parser.add_argument('-patience', '--early_stopping_patience', type=float, default=50, #float("inf")
+                        help="Patience epochs for early stopping based on Val Acc")
 
     args = parser.parse_args()
     return args
@@ -82,6 +131,55 @@ def parse_args():
 # ═══════════════════════════════════════════════════════════════════════════
 # Utilities
 # ═══════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Champion promotion helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _load_canonical_metric(canonical_dir):
+    """Return the reference metric stored in the canonical champion folder (0.0 if absent)."""
+    path = os.path.join(canonical_dir, 'best_metrics.json')
+    if not os.path.exists(path):
+        return 0.0
+    try:
+        with open(path) as f:
+            return float(json.load(f).get('reference_metric', 0.0))
+    except Exception:
+        return 0.0
+
+
+def _promote_to_canonical(temp_dir, canonical_dir):
+    """Copy all files from the temporary run folder to the canonical champion folder."""
+    os.makedirs(canonical_dir, exist_ok=True)
+    for fname in os.listdir(temp_dir):
+        src = os.path.join(temp_dir, fname)
+        if os.path.isfile(src):
+            shutil.copy2(src, os.path.join(canonical_dir, fname))
+    print(f"[champion] Promoted → {canonical_dir}")
+
+
+def _cleanup_temp(temp_dir):
+    """Delete the temporary run folder at the end of training."""
+    if os.path.isdir(temp_dir):
+        shutil.rmtree(temp_dir)
+        print(f"[champion] Removed temp folder: {temp_dir}")
+
+
+def _build_metrics_json(run_name, canonical_dir, epoch, reference_metric,
+                        std_metrics, aligned_metrics):
+    """Assemble the best_metrics.json payload."""
+    def _r(x, d=6):
+        return round(float(x), d)
+
+    return {
+        'run_name':         run_name,
+        'canonical_name':   os.path.basename(canonical_dir),
+        'epoch':            int(epoch),
+        'reference_metric': _r(reference_metric),
+        'standard':         std_metrics,
+        'aligned':          aligned_metrics,   # None when align_mode=0
+    }
+
 
 def select_best_gpu():
     """Automatically select the GPU with the most free memory."""
@@ -109,8 +207,9 @@ def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last
         input_size=config["input_size"],
         is_train=is_train,
         is_val=is_val,
-        preprocessing=config.get("preprocessing", "none"),
-        use_augs=True if args.use_augs == 1 else False,
+
+        use_augs=args.use_augs,
+        affine_prob=args.affine_prob,
         debug=args.debug
     ).create_dataset()
 
@@ -142,6 +241,7 @@ def build_test_data_loader(args, config):
     return _build_data_loader_common(args, config, is_train=False, is_val=False, shuffle=False, drop_last=False, return_class2idx=True)
 
 
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Model & Optimizer
 # ═══════════════════════════════════════════════════════════════════════════
@@ -152,13 +252,7 @@ def build_model(config, args):
     pooling_type = config.get("pooling_type", "mean")
     n_components = config.get("gmm_n_components", 1)
 
-    preprocessing = config.get("preprocessing", "none")
-    if preprocessing == "fourier":
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_fourier_{args.reals}_{config['input_size']}_{pooling_type}.npy"
-    elif preprocessing == "srm":
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_srm_{args.reals}_{config['input_size']}_{pooling_type}.npy"
-    else:
-        gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
+    gmm_parameters = f"{const.WORKING_DIR}/parameters/{'aligned_' if args.align_mode else ''}{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
 
     if not os.path.exists(gmm_parameters):
         print(f"GMM parameters not found at {gmm_parameters}.")
@@ -186,8 +280,7 @@ def build_model(config, args):
         backbone_weights=args.backbone_weights,
         out_indices=config.get("out_indices", [1, 2, 3]),
         pooling_type=pooling_type,
-        use_proj_layer=False,
-        proj_hidden_ratio=0.5,
+
     )
     print("Model A.D. Param#: {}".format(
         sum(p.numel() for p in model.parameters() if p.requires_grad)))
@@ -288,38 +381,60 @@ def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto'
     return result
 
 
-def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx, y_true_0_base, y_pred_0_base):
-    """Helper function to compute metrics for a single class in parallel."""
-    mask_c = class_masks[c]
-    y_true_c = labels[mask_c]
-    y_pred_c = preds[mask_c]
-    preds_c = preds_[mask_c]
+def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx,
+                           y_true_0_base, y_pred_0_base, preds_0_base):
+    """Helper function to compute metrics for a single class in parallel.
 
-    min_len = min(len(y_true_c), len(y_true_0_base))
+    y_pred_0_base : binary predictions for the baseline class (for accuracy)
+    preds_0_base  : continuous anomaly scores for the baseline class (for AP/ROC)
+    """
+    mask_c  = class_masks[c]
+    y_pred_c = preds[mask_c]   # binary, for accuracy
+    preds_c  = preds_[mask_c]  # continuous, for AP / ROC
+
+    min_len = min(len(preds_c), len(y_true_0_base))
     if min_len == 0:
         return None
 
-    class_name = class2idx[c] if class2idx else str(c)
+    class_name     = class2idx[c] if class2idx else str(c)
     loss_mean_fake = float(preds_c.mean())
-    loss_std_fake = float(preds_c.std())
+    loss_std_fake  = float(preds_c.std())
 
     rng = np.random.RandomState(42 + c)
     idx = rng.permutation(len(y_true_0_base))
-    y_pred_0_shuffled = y_pred_0_base[idx]
 
-    y_pred_balanced = np.concatenate([y_pred_c[:min_len], y_pred_0_shuffled[:min_len]])
-    y_true_binary = np.concatenate([np.ones(min_len, dtype=np.int8), np.zeros(min_len, dtype=np.int8)])
+    # Binary balanced arrays (for accuracy)
+    y_pred_balanced = np.concatenate([y_pred_c[:min_len], y_pred_0_base[idx][:min_len]])
+    # Continuous balanced arrays (for AP / ROC)
+    scores_balanced = np.concatenate([preds_c[:min_len],  preds_0_base[idx][:min_len]])
+    y_true_binary   = np.concatenate([np.ones(min_len, dtype=np.int8),
+                                      np.zeros(min_len, dtype=np.int8)])
+
+    # Oracle (unilateral): thr* = argmax(TPR - FPR) on raw scores
+    _fpr, _tpr, _thr = roc_curve(y_true_binary, scores_balanced)
+    _best            = np.argmax(_tpr - _fpr)
+    _preds_oracle    = (scores_balanced >= _thr[_best]).astype(np.int8)
+
+    # Oracle (bilateral): distance from real-score center, then Youden's J
+    _mu_real          = float(preds_0_base.mean())
+    _distances        = np.abs(scores_balanced - _mu_real)
+    _fpr_b, _tpr_b, _thr_b = roc_curve(y_true_binary, _distances)
+    _best_b           = np.argmax(_tpr_b - _fpr_b)
+    _preds_oracle_b   = (_distances >= _thr_b[_best_b]).astype(np.int8)
 
     return {
-        'class_id': c, 'class_name': class_name, 'min_len': min_len,
-        'loss_mean': loss_mean_fake, 'loss_std': loss_std_fake,
-        'accuracy': accuracy_score(y_true_binary, y_pred_balanced),
-        'ap': average_precision_score(y_true_binary, y_pred_balanced),
-        'roc': roc_auc_score(y_true_binary, y_pred_balanced),
+        'class_id':          c, 'class_name': class_name, 'min_len': min_len,
+        'loss_mean':         loss_mean_fake, 'loss_std': loss_std_fake,
+        'accuracy':          accuracy_score(y_true_binary, y_pred_balanced),
+        'acc_oracle':        accuracy_score(y_true_binary, _preds_oracle),
+        'acc_oracle_bi':     accuracy_score(y_true_binary, _preds_oracle_b),
+        'ap':                average_precision_score(y_true_binary, scores_balanced),
+        'roc':               roc_auc_score(y_true_binary, scores_balanced),
     }
 
 
-def eval_once(dataloader, model, epoch, class2idx=None, threshold_info=None):
+def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None,
+              wandb_log=False, wandb_prefix: str = ""):
     inference_start_time = time.time()
     model.eval()
     labels_list = []
@@ -335,7 +450,8 @@ def eval_once(dataloader, model, epoch, class2idx=None, threshold_info=None):
 
     inference_time = time.time() - inference_start_time
     print(f"Testing done")
-    print(f"⏱️  Test inference time: {int(inference_time // 60)}m {int(inference_time % 60)}s")
+    if epoch is not None:
+        print(f"⏱️  Test inference time: {int(inference_time // 60)}m {int(inference_time % 60)}s")
 
     preds_ = torch.cat(preds_list, dim=0).numpy()
     labels = torch.cat(labels_list, dim=0).numpy()
@@ -359,7 +475,7 @@ def eval_once(dataloader, model, epoch, class2idx=None, threshold_info=None):
         if c != 0 and c != 99:
             mask_fake |= class_masks[c]
 
-    if epoch % 50 == 0:
+    if epoch is not None and epoch % 50 == 0 and not wandb_prefix:
         likelihood_real = preds_[class_masks[0]]
         likelihood_ood_real = preds_[class_masks.get(99, np.zeros(len(labels), dtype=bool))]
         likelihood_fake = preds_[mask_fake]
@@ -381,139 +497,254 @@ def eval_once(dataloader, model, epoch, class2idx=None, threshold_info=None):
     aps, accs, rocs, cls = [], [], [], []
     per_class_metrics = {}
 
-    mask_0 = class_masks[0]
+    mask_0   = class_masks[0]
     y_true_0 = labels[mask_0]
-    y_pred_0 = preds[mask_0]
-    preds_0 = preds_[mask_0]
+    y_pred_0 = preds[mask_0]    # binary
+    preds_0  = preds_[mask_0]   # continuous
 
+    loss_mean_real = loss_std_real = 0.0
     if len(preds_0) > 0:
         loss_mean_real = preds_0.mean()
-        loss_std_real = preds_0.std()
-        per_class_metrics["loss_per_class/Real"] = loss_mean_real
+        loss_std_real  = preds_0.std()
+        per_class_metrics["loss_per_class/Real"]     = loss_mean_real
         per_class_metrics["loss_std_per_class/Real"] = loss_std_real
+
+    preds_99         = np.array([])
+    y_pred_ood_real  = np.array([], dtype=int)
+    y_true_ood_real  = np.array([])
+    mean_roc_ood     = 0.0
+    acc_ood_real     = 0.0
+    class_ood_real_name = "OOD_Real"
 
     if 99 in class_masks:
         class_ood_real_name = class2idx[99] if class2idx else "OOD_Real"
-        mask_99 = class_masks[99]
+        mask_99         = class_masks[99]
         y_true_ood_real = labels[mask_99]
         y_pred_ood_real = preds[mask_99]
-        preds_99 = preds_[mask_99]
+        preds_99        = preds_[mask_99]
 
         if len(preds_99) > 0:
-            loss_mean_ood_real = preds_99.mean()
-            loss_std_ood_real = preds_99.std()
-            per_class_metrics[f"loss_per_class/{class_ood_real_name}"] = loss_mean_ood_real
-            per_class_metrics[f"loss_std_per_class/{class_ood_real_name}"] = loss_std_ood_real
-            y_true_ood_real_binary = np.zeros(len(y_true_ood_real), dtype=np.int8)
-            acc_ood_real = accuracy_score(y_true_ood_real_binary, y_pred_ood_real)
-            print("-" * 30)
-            print(f"  > Class {class_ood_real_name} (N={len(y_true_ood_real)}): \t Accuracy = {acc_ood_real:.4f}, \t Loss = {loss_mean_ood_real:.4f}±{loss_std_ood_real:.4f}")
-            print("-" * 30)
+            per_class_metrics[f"loss_per_class/{class_ood_real_name}"]     = float(preds_99.mean())
+            per_class_metrics[f"loss_std_per_class/{class_ood_real_name}"] = float(preds_99.std())
+            acc_ood_real = accuracy_score(
+                np.zeros(len(y_true_ood_real), dtype=np.int8), y_pred_ood_real)
             per_class_metrics[f"acc_per_class/{class_ood_real_name}"] = acc_ood_real
+
+    # Accuracy of class 0 (used as binary baseline — shown before table, not in mean)
+    acc_real = accuracy_score(np.zeros(len(y_true_0), dtype=np.int8), y_pred_0) \
+               if len(y_true_0) > 0 else 0.0
 
     classes_to_process = [c for c in classes[1:] if c != 99]
 
-    print("\n" + "Computing metrics using Real as baseline...")
+    print("\nComputing metrics using Real as baseline...")
+    print("-" * 30)
+    print(f"  > Class Real      (N={len(y_true_0)}): \t Accuracy = {acc_real:.4f}, \t Loss = {preds_0.mean() if len(preds_0) > 0 else 0:.4f}±{preds_0.std() if len(preds_0) > 0 else 0:.4f}")
     print("=" * 30)
     metrics_real_start_time = time.time()
     results = Parallel(n_jobs=-1, backend='threading')(
         delayed(_compute_class_metrics)(
-            c, class_masks, labels, preds, preds_, class2idx, y_true_0, y_pred_0
+            c, class_masks, labels, preds, preds_, class2idx, y_true_0, y_pred_0, preds_0
         ) for c in classes_to_process
     )
 
+    accs_oracle, accs_oracle_bi = [], []
     for result in results:
         if result is None:
             continue
-        print(f"  > Class {result['class_name']} (N={result['min_len']*2}): \t Accuracy = {result['accuracy']:.4f}, \t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}, \t Loss = {result['loss_mean']:.4f}±{result['loss_std']:.4f}")
+        print(f"  > Class {result['class_name']} (N={result['min_len']*2}): \t Accuracy = {result['accuracy']:.4f} (oracle={result['acc_oracle']:.4f}, bi={result['acc_oracle_bi']:.4f}), \t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}, \t Loss = {result['loss_mean']:.4f}±{result['loss_std']:.4f}")
         print("-" * 30)
-        per_class_metrics[f"loss_per_class/{result['class_name']}"] = result['loss_mean']
-        per_class_metrics[f"loss_std_per_class/{result['class_name']}"] = result['loss_std']
-        per_class_metrics[f"acc_per_class/{result['class_name']}"] = result['accuracy']
-        per_class_metrics[f"ap_per_class/{result['class_name']}"] = result['ap']
-        per_class_metrics[f"roc_per_class/{result['class_name']}"] = result['roc']
+        per_class_metrics[f"loss_per_class/{result['class_name']}"]          = result['loss_mean']
+        per_class_metrics[f"loss_std_per_class/{result['class_name']}"]      = result['loss_std']
+        per_class_metrics[f"acc_per_class/{result['class_name']}"]           = result['accuracy']
+        per_class_metrics[f"acc_oracle_per_class/{result['class_name']}"]    = result['acc_oracle']
+        per_class_metrics[f"acc_oracle_bi_per_class/{result['class_name']}"] = result['acc_oracle_bi']
+        per_class_metrics[f"ap_per_class/{result['class_name']}"]            = result['ap']
+        per_class_metrics[f"roc_per_class/{result['class_name']}"]           = result['roc']
         aps.append(result['ap'])
         accs.append(result['accuracy'])
+        accs_oracle.append(result['acc_oracle'])
+        accs_oracle_bi.append(result['acc_oracle_bi'])
         rocs.append(result['roc'])
         cls.append(result['class_id'])
 
-    mean_acc = np.mean(accs)
-    mean_ap = np.mean(aps)
-    mean_roc = np.mean(rocs)
+    mean_acc           = np.mean(accs)
+    mean_acc_oracle    = np.mean(accs_oracle)
+    mean_acc_oracle_bi = np.mean(accs_oracle_bi)
+    mean_ap            = np.mean(aps)
+    mean_roc           = np.mean(rocs)
 
     metrics_real_time = time.time() - metrics_real_start_time
     print("-" * 30)
-    print(f"Average Accuracy (vs Real): {mean_acc:.4f}")
-    print(f"Average Precision (vs Real): {mean_ap:.4f}")
-    print(f"Average ROC AUC (vs Real): {mean_roc:.4f}")
-    print(f"⏱️  Metrics computation time (Real baseline): {int(metrics_real_time // 60)}m {int(metrics_real_time % 60)}s")
+    _print_family_summary(_aggregate_by_family(results))
+    if epoch is not None:
+        print(f"⏱️  Metrics computation time (Real baseline): {int(metrics_real_time // 60)}m {int(metrics_real_time % 60)}s")
     print("=" * 30 + "\n")
 
     # ============ Compute metrics using OOD Real as baseline ============
     aps_ood, accs_ood, rocs_ood = [], [], []
+    mean_acc_ood = mean_ap_ood = mean_roc_ood = 0.0
+    mean_acc_oracle_bi_ood = 0.0
+    accs_oracle_ood = []
 
     if 99 in class_masks and len(preds_99) > 0:
         print("Computing metrics using OOD Real as baseline...")
+        print("-" * 30)
+        print(f"  > Class {class_ood_real_name} (N={len(y_true_ood_real)}): \t Accuracy = {acc_ood_real:.4f}, \t Loss = {preds_99.mean():.4f}±{preds_99.std():.4f}")
         print("=" * 30)
         metrics_ood_start_time = time.time()
         results_ood = Parallel(n_jobs=-1, backend='threading')(
             delayed(_compute_class_metrics)(
-                c, class_masks, labels, preds, preds_, class2idx, y_true_ood_real, y_pred_ood_real
+                c, class_masks, labels, preds, preds_, class2idx, y_true_ood_real, y_pred_ood_real, preds_99
             ) for c in classes_to_process
         )
+        accs_oracle_ood, accs_oracle_bi_ood = [], []
         for result in results_ood:
             if result is None:
                 continue
-            print(f"  > Class {result['class_name']} (N={result['min_len']*2}): \t Accuracy = {result['accuracy']:.4f}, \t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}")
+            print(f"  > Class {result['class_name']} (N={result['min_len']*2}): \t Accuracy = {result['accuracy']:.4f} (oracle={result['acc_oracle']:.4f}, bi={result['acc_oracle_bi']:.4f}), \t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}")
             print("-" * 30)
-            per_class_metrics[f"acc_per_class_ood/{result['class_name']}"] = result['accuracy']
-            per_class_metrics[f"ap_per_class_ood/{result['class_name']}"] = result['ap']
-            per_class_metrics[f"roc_per_class_ood/{result['class_name']}"] = result['roc']
+            per_class_metrics[f"acc_per_class_ood/{result['class_name']}"]           = result['accuracy']
+            per_class_metrics[f"acc_oracle_per_class_ood/{result['class_name']}"]    = result['acc_oracle']
+            per_class_metrics[f"acc_oracle_bi_per_class_ood/{result['class_name']}"] = result['acc_oracle_bi']
+            per_class_metrics[f"ap_per_class_ood/{result['class_name']}"]            = result['ap']
+            per_class_metrics[f"roc_per_class_ood/{result['class_name']}"]           = result['roc']
             aps_ood.append(result['ap'])
             accs_ood.append(result['accuracy'])
+            accs_oracle_ood.append(result['acc_oracle'])
+            accs_oracle_bi_ood.append(result['acc_oracle_bi'])
             rocs_ood.append(result['roc'])
 
-        mean_acc_ood = np.mean(accs_ood) if len(accs_ood) > 0 else 0
-        mean_ap_ood = np.mean(aps_ood) if len(aps_ood) > 0 else 0
-        mean_roc_ood = np.mean(rocs_ood) if len(rocs_ood) > 0 else 0
+        mean_acc_ood = np.mean(accs_ood) if len(accs_ood) > 0 else 0.0
+        mean_ap_ood  = np.mean(aps_ood)  if len(aps_ood)  > 0 else 0.0
+        mean_roc_ood = np.mean(rocs_ood) if len(rocs_ood) > 0 else 0.0
 
         metrics_ood_time = time.time() - metrics_ood_start_time
         print("-" * 30)
-        print(f"Average Accuracy (vs OOD Real): {mean_acc_ood:.4f}")
-        print(f"Average Precision (vs OOD Real): {mean_ap_ood:.4f}")
-        print(f"Average ROC AUC (vs OOD Real): {mean_roc_ood:.4f}")
-        print(f"⏱️  Metrics computation time (OOD Real baseline): {int(metrics_ood_time // 60)}m {int(metrics_ood_time % 60)}s")
+        _print_family_summary(_aggregate_by_family(results_ood))
+        if epoch is not None:
+            print(f"⏱️  Metrics computation time (OOD Real baseline): {int(metrics_ood_time // 60)}m {int(metrics_ood_time % 60)}s")
         print("=" * 30 + "\n")
 
         per_class_metrics["Val acc OOD"] = mean_acc_ood
         per_class_metrics["Val AP OOD"] = mean_ap_ood
         per_class_metrics["Val ROC OOD"] = mean_roc_ood
 
-    test_loss_real_mean = loss_mean_real if len(preds_0) > 0 else 0
-    test_loss_real_std = loss_std_real if len(preds_0) > 0 else 0
+    test_loss_real_mean = loss_mean_real
+    test_loss_real_std  = loss_std_real
 
-    preds_fake = preds_[mask_fake]
+    preds_fake        = preds_[mask_fake]
+    preds_fake_binary = preds[mask_fake]
     test_loss_fake_mean = preds_fake.mean() if len(preds_fake) > 0 else 0
-    test_loss_fake_std = preds_fake.std() if len(preds_fake) > 0 else 0
+    test_loss_fake_std  = preds_fake.std()  if len(preds_fake) > 0 else 0
 
-    wandb_log_dict = {
-        "Val acc": mean_acc,
-        "Test loss real mean": test_loss_real_mean,
-        "Test loss fake mean": test_loss_fake_mean,
-        "Test loss real std": test_loss_real_std,
-        "Test loss fake std": test_loss_fake_std,
+    # ── Global: Real vs All Fake ──────────────────────────────────────────────
+    global_metrics = {}
+    if len(preds_fake) > 0 and len(preds_0) > 0:
+        min_n  = min(len(preds_0), len(preds_fake))
+        rng    = np.random.RandomState(42)
+        idx_r  = rng.permutation(len(preds_0))[:min_n]
+        idx_f  = rng.permutation(len(preds_fake))[:min_n]
+
+        sc_g   = np.concatenate([preds_fake[idx_f],        preds_0[idx_r]])
+        yp_g   = np.concatenate([preds_fake_binary[idx_f], y_pred_0[idx_r]])
+        yt_g   = np.concatenate([np.ones(min_n, dtype=np.int8),
+                                  np.zeros(min_n, dtype=np.int8)])
+
+        acc_g  = accuracy_score(yt_g, yp_g)
+        ap_g   = average_precision_score(yt_g, sc_g)
+        roc_g  = roc_auc_score(yt_g, sc_g)
+
+        _fg, _tg, _thr_g = roc_curve(yt_g, sc_g)
+        _og = np.argmax(_tg - _fg)
+        acc_oracle_g = accuracy_score(yt_g, (sc_g >= _thr_g[_og]).astype(np.int8))
+
+        _mu_g  = float(preds_0.mean())
+        _dist_g = np.abs(sc_g - _mu_g)
+        _fgb, _tgb, _thr_gb = roc_curve(yt_g, _dist_g)
+        _ogb = np.argmax(_tgb - _fgb)
+        acc_oracle_bi_g = accuracy_score(yt_g, (_dist_g >= _thr_gb[_ogb]).astype(np.int8))
+
+        print(f"\n{'=' * 30}")
+        print(f"Global — Real vs All Fake (N={min_n} each, {len(preds_fake)} fake tot.)")
+        print(f"  Acc={acc_g:.4f}  (oracle={acc_oracle_g:.4f}, bi={acc_oracle_bi_g:.4f})")
+        print(f"  AP={ap_g:.4f}   ROC AUC={roc_g:.4f}")
+        print(f"{'=' * 30}\n")
+
+        per_class_metrics["global/acc"]           = acc_g
+        per_class_metrics["global/acc_oracle"]    = acc_oracle_g
+        per_class_metrics["global/acc_oracle_bi"] = acc_oracle_bi_g
+        per_class_metrics["global/ap"]            = ap_g
+        per_class_metrics["global/roc"]           = roc_g
+
+        global_metrics = {
+            'n_balanced':    int(min_n),
+            'n_fake_total':  int(len(preds_fake)),
+            'acc':           float(round(acc_g, 6)),
+            'acc_oracle':    float(round(acc_oracle_g, 6)),
+            'acc_oracle_bi': float(round(acc_oracle_bi_g, 6)),
+            'ap':            float(round(ap_g, 6)),
+            'roc':           float(round(roc_g, 6)),
+        }
+
+    if wandb_log:
+        p = wandb_prefix
+        wandb_log_dict = {
+            f"{p}Val acc":             mean_acc,
+            f"{p}Test loss real mean": test_loss_real_mean,
+            f"{p}Test loss fake mean": test_loss_fake_mean,
+            f"{p}Test loss real std":  test_loss_real_std,
+            f"{p}Test loss fake std":  test_loss_fake_std,
+        }
+        wandb_log_dict.update({f"{p}{k}": v for k, v in per_class_metrics.items()})
+        wandb.log(wandb_log_dict, step=(epoch + 1) if epoch is not None else 0)
+
+    # ── Metrics summary for JSON ──────────────────────────────────────────
+    def _r(x, d=6): return round(float(x), d)
+
+    def _per_class_dict(result_list):
+        return {
+            r['class_name']: {
+                'acc':           _r(r['accuracy']),
+                'acc_oracle':    _r(r['acc_oracle']),
+                'acc_oracle_bi': _r(r['acc_oracle_bi']),
+                'ap':            _r(r['ap']),
+                'roc':           _r(r['roc']),
+                'loss_mean':     _r(r['loss_mean'], 4),
+                'loss_std':      _r(r['loss_std'],  4),
+            }
+            for r in result_list if r is not None
+        }
+
+    metrics_summary = {
+        'vs_real': {
+            'mean_acc':           _r(mean_acc),
+            'mean_acc_oracle':    _r(mean_acc_oracle),
+            'mean_acc_oracle_bi': _r(mean_acc_oracle_bi),
+            'mean_ap':            _r(mean_ap),
+            'mean_roc':           _r(mean_roc),
+            'per_class':          _per_class_dict(results),
+        },
     }
-    wandb_log_dict.update(per_class_metrics)
-    wandb.log(wandb_log_dict, step=epoch + 1)
+    if 99 in class_masks and len(preds_99) > 0:
+        metrics_summary['vs_ood_real'] = {
+            'mean_acc':           _r(mean_acc_ood),
+            'mean_acc_oracle':    _r(np.mean(accs_oracle_ood) if accs_oracle_ood else 0),
+            'mean_acc_oracle_bi': _r(mean_acc_oracle_bi_ood),
+            'mean_ap':            _r(mean_ap_ood),
+            'mean_roc':           _r(mean_roc_ood),
+            'per_class':          _per_class_dict(results_ood),
+        }
+    if global_metrics:
+        metrics_summary['global'] = global_metrics
 
-    return mean_acc, preds_, labels
+    return mean_roc_ood, preds_, labels, metrics_summary
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Main training loop
 # ═══════════════════════════════════════════════════════════════════════════
 
-def train(args, config):
+def train(args, config, canonical_checkpoint_dir):
     checkpoint_dir = const.CHECKPOINT_DIR
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -549,32 +780,34 @@ def train(args, config):
 
     optimizer = build_optimizer(args, model, config)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=args.lr_decay,
-                                  patience=args.lr_patience, verbose=True) if args.scheduler == 1 else None
+                                  patience=args.lr_patience, verbose=True) if args.scheduler else None
 
     train_dataloader = build_train_data_loader(args, config)
-    val_dataloader = build_val_data_loader(args, config)
+    val_dataloader   = build_val_data_loader(args, config)
+
     test_dataloader, class2idx = build_test_data_loader(args, config)
 
-    best_acc = 0
+    best_metric = 0.0
     patience_counter = 0
+    eval_metrics = {}
 
     for epoch in range(args.num_epochs):
         train_mean, train_std, _ = train_one_epoch(
             train_dataloader, model, optimizer, epoch, args, scheduler=scheduler)
 
-        current_acc = -1
+        current_metric = -1.0
 
         if (epoch + 1) % args.eval_interval == 0:
             threshold_info = compute_threshold(
                 val_dataloader, model,
-                use_lof=args.use_lof == 1,
+                use_lof=args.use_lof,
                 contamination=args.contamination,
                 alpha=args.alpha)
 
             l_threshold_val = threshold_info['l_threshold']
             u_threshold_val = threshold_info['u_threshold']
             val_mean = threshold_info.get('mean', None)
-            val_std = threshold_info.get('std', None)
+            val_std  = threshold_info.get('std', None)
 
             print(f"Training loss stats: mean: {train_mean:.4f}, std: {train_std:.4f}")
 
@@ -588,15 +821,16 @@ def train(args, config):
                 log_dict["Val Loss Std"] = val_std
             wandb.log(log_dict, step=epoch + 1)
 
-            acc, preds, labels = eval_once(test_dataloader, model, epoch, class2idx, threshold_info)
-            current_acc = acc
+            current_metric, preds, labels, eval_metrics = eval_once(
+                test_dataloader, model, epoch=epoch, class2idx=class2idx,
+                threshold_info=threshold_info, wandb_log=True)
 
-            if current_acc > best_acc:
-                best_acc = current_acc
+            if current_metric > best_metric:
+                best_metric = current_metric
                 patience_counter = 0
 
-                print(f"Epoch {epoch+1}: New best accuracy: {best_acc:.4f}. Saving model.")
-                wandb.run.summary["best_accuracy"] = best_acc
+                print(f"Epoch {epoch+1}: New best ROC OOD: {best_metric:.4f}. Saving model.")
+                wandb.run.summary["best_roc_ood"] = best_metric
 
                 checkpoint_path = os.path.join(checkpoint_dir, "best.pt")
                 torch.save({
@@ -607,7 +841,6 @@ def train(args, config):
 
                 args_dict = vars(args).copy()
                 args_dict.pop('device', None)
-                args_dict["preprocessing"] = config.get("preprocessing", "none")
                 with open(os.path.join(checkpoint_dir, "run_config.yaml"), 'w') as f:
                     yaml.dump(args_dict, f, default_flow_style=False)
 
@@ -616,40 +849,79 @@ def train(args, config):
                     if key in threshold_info and threshold_info[key] is not None:
                         save_dict[key] = threshold_info[key]
                 np.savez(os.path.join(checkpoint_dir, "thresholds.npz"), **save_dict)
-                np.save(os.path.join(checkpoint_dir, "preds_best.npy"), preds)
-                np.save(os.path.join(checkpoint_dir, "labels_best.npy"), labels)
+
+                preds_suffix = "_aligned" if args.align_mode else ""
+                np.save(os.path.join(checkpoint_dir, f"preds_best{preds_suffix}.npy"), preds)
+                np.save(os.path.join(checkpoint_dir, f"labels_best{preds_suffix}.npy"), labels)
+                with open(os.path.join(checkpoint_dir, f"class2idx_best{preds_suffix}.json"), 'w') as _f:
+                    json.dump({int(k): v for k, v in class2idx.items()}, _f)
 
                 if 'lof' in threshold_info:
                     joblib.dump(threshold_info['lof'], os.path.join(checkpoint_dir, "lof_model.pkl"))
+
+                # ── Metrics JSON ──────────────────────────────────────────────
+                metrics_payload = _build_metrics_json(
+                    run_name=args.run_name,
+                    canonical_dir=canonical_checkpoint_dir,
+                    epoch=epoch,
+                    reference_metric=current_metric,
+                    std_metrics=eval_metrics if not args.align_mode else None,
+                    aligned_metrics=eval_metrics if args.align_mode else None,
+                )
+                with open(os.path.join(checkpoint_dir, 'best_metrics.json'), 'w') as _f:
+                    json.dump(metrics_payload, _f, indent=2)
+
             else:
                 patience_counter += 1
-                print(f"Epoch {epoch+1}: Accuracy ({current_acc:.4f}) not improved compared to {best_acc:.4f}. Patience: {patience_counter}/{args.early_stopping_patience}")
+                print(f"Epoch {epoch+1}: ROC OOD ({current_metric:.4f}) not improved compared to {best_metric:.4f}. Patience: {patience_counter}/{args.early_stopping_patience}")
 
         if patience_counter >= args.early_stopping_patience:
-            print(f"Stopping early at epoch {epoch + 1} after {args.early_stopping_patience} epochs without improvement of Val Acc.")
+            print(f"Stopping early at epoch {epoch + 1} after {args.early_stopping_patience} epochs without improvement of ROC OOD.")
             break
 
-    print(f"Training finished. Best accuracy: {best_acc:.4f}")
+    print(f"Training finished. Best ROC OOD: {best_metric:.4f}")
+
+    # ── End-of-training champion promotion ───────────────────────────────────
+    canonical_best_metric = _load_canonical_metric(canonical_checkpoint_dir)
+    print(f"[champion] This run: {best_metric:.4f}  |  Canonical: {canonical_best_metric:.4f}")
+    if best_metric > canonical_best_metric:
+        _promote_to_canonical(checkpoint_dir, canonical_checkpoint_dir)
+        print(f"[champion] New champion!  {best_metric:.4f} > {canonical_best_metric:.4f}")
+    else:
+        print(f"[champion] No promotion. Canonical remains at {canonical_best_metric:.4f}")
+
+    _cleanup_temp(checkpoint_dir)
 
 
 if __name__ == "__main__":
     args = parse_args()
+    args.align_mode = 'aligned' in const.DATA_DIR
     config = yaml.safe_load(open(args.config, "r"))
     pprint(vars(args))
     pprint(config)
 
-    if args.run_name is None:
-        args.run_name = f"{config['backbone_name']}_{args.data}_{args.reals}"
-        _preprocessing = config.get("preprocessing", "none")
-        if _preprocessing != "none":
-            args.run_name += f"_{_preprocessing}"
-        args.run_name += f"_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}_ld{args.lr_decay}_lp{args.lr_patience}_{config['pooling_type']}"
-        if args.use_lof == 1:
-            args.run_name += "_lof"
-        else:
-            args.run_name += f"_t-alpha{args.alpha}"
-        if args.use_augs == 1:
-            args.run_name += "_augs"
+    # ── Canonical run name (no hyperparams) ─────────────────────────────────
+    canonical_run_name = f"{config['backbone_name']}_{args.data}_{args.reals}"
+    if args.align_mode:
+        canonical_run_name += "_aligned"
+    canonical_run_name += f"_{config['pooling_type']}"
+    if args.use_lof:
+        canonical_run_name += "_lof"
+    else:
+        canonical_run_name += f"_t-alpha{args.alpha}"
+    if args.use_augs:
+        canonical_run_name += "_augs"
 
-    const.CHECKPOINT_DIR += "/" + args.run_name
-    train(args, config)
+    # ── Temporary run name = canonical + hyperparams ─────────────────────────
+    if args.run_name is None:
+        args.run_name = (canonical_run_name +
+                         f"affine{args.affine_prob}_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}"
+                         f"_ld{args.lr_decay}_lp{args.lr_patience}")
+
+    canonical_checkpoint_dir = os.path.join(const.CHECKPOINT_DIR, canonical_run_name)
+    const.CHECKPOINT_DIR     = os.path.join(const.CHECKPOINT_DIR, args.run_name)
+
+    print(f"[champion] Canonical dir : {canonical_checkpoint_dir}")
+    print(f"[champion] Temporary dir : {const.CHECKPOINT_DIR}")
+
+    train(args, config, canonical_checkpoint_dir=canonical_checkpoint_dir)

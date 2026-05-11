@@ -1,6 +1,6 @@
 CHECKPOINT_DIR = "logs/"
 
-DATA_DIR = "/media/orazio_mattia_group/ad4dd"
+DATA_DIR = "/media/orazio_mattia_group/ad4dd/aligned"
 WORKING_DIR = "/home/opontorno/projects/MuFlow"
 
 # ── Classic backbones ─────────────────────────────────────────────────────────
