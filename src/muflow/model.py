@@ -138,7 +138,6 @@ class FastFlow(nn.Module):
         in_channels=3,
         out_indices=[1, 2, 3],
         pooling_type='mean',
-        align_aligner_mode: str = 'ffhq',
     ):
         super(FastFlow, self).__init__()
         assert (
@@ -231,10 +230,6 @@ class FastFlow(nn.Module):
         self.input_size   = input_size
         self.pooling_type = pooling_type
 
-        # ── Alignment mode ────────────────────────────────────────────────
-        self._align_aligner_mode = align_aligner_mode
-        self._aligner          = None   # lazy-initialised on first predict() call
-
         gmm_values = gmm_values["real"]
         self.means = []
         self.covs = []
@@ -281,31 +276,15 @@ class FastFlow(nn.Module):
         return result
 
     # ═══════════════════════════════════════════════════════════════════════
-    # Alignment helpers & single-image predict()
+    # Single-image predict()
     # ═══════════════════════════════════════════════════════════════════════
 
-    def _get_aligner(self):
-        if self._aligner is None:
-            from muflow.alignment import Aligner
-            output_size   = self.input_size if isinstance(self.input_size, int) \
-                            else self.input_size[0]
-            self._aligner = Aligner(mode=self._align_aligner_mode,
-                                    output_size=output_size)
-        return self._aligner
-
-    def predict(self, image, align: bool = False) -> dict:
+    def predict(self, image) -> dict:
         """
-        Single-image inference with optional face alignment.
-
-        Applies the inference transform pipeline (Resize, ToTensor, Normalize)
-        (Resize → [align] → ToTensor → Normalize) and returns the anomaly
-        scores for the image.
+        Single-image inference.
 
         Args:
             image : PIL.Image.Image or np.ndarray (H×W×3 uint8 RGB)
-            align : if True, apply FFHQ-style face alignment before inference
-                    using the Aligner (face-alignment library + FAN).
-                    On detection failure the original image is used.
 
         Returns:
             dict with:
@@ -315,21 +294,12 @@ class FastFlow(nn.Module):
         from PIL import Image as _PIL
         from muflow.dataset import create_image_transform
 
-        # ── Input normalisation ───────────────────────────────────────────
         if isinstance(image, np.ndarray):
             image = _PIL.fromarray(image.astype(np.uint8))
         elif not isinstance(image, _PIL.Image):
             raise TypeError(
                 f"image must be PIL.Image or np.ndarray, got {type(image).__name__}"
             )
-
-        # ── Optional face alignment ───────────────────────────────────────
-        if align:
-            from muflow.alignment import FaceNotFoundError
-            try:
-                image = self._get_aligner().align(image)
-            except FaceNotFoundError as e:
-                print(f"[predict] WARNING: face not detected — skipping alignment. ({e})")
 
         # ── Preprocessing (same as dataset pipeline) ──────────────────────
         transform = create_image_transform(
