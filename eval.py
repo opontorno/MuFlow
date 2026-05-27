@@ -64,9 +64,6 @@ def parse_args():
         if not hasattr(args, k):
             setattr(args, k, v)
 
-    # Auto-detect align_mode from DATA_DIR (overrides any value in run_config.yaml)
-    args.align_mode = 'aligned' in dataset.DATA_DIR
-
     # Resolve file paths relative to run_dir
     args.checkpoint     = os.path.join(args.run_dir, 'best.pt')
     args.threshold_path = os.path.join(args.run_dir, 'thresholds.npz')
@@ -74,7 +71,7 @@ def parse_args():
 
     print(f"[eval] Run dir  : {args.run_dir}")
     print(f"[eval] Config   : {args.config}")
-    print(f"[eval] alpha={args.alpha}")
+    print(f"[eval] alpha    : {args.alpha}")
     return args
 
 
@@ -106,29 +103,6 @@ def create_dataloader(args, config, opt):
         drop_last=False,
     )
     return data_loader, {v: k for k, v in test_dataset.class_to_idx.items()}
-
-
-def build_aligned_test_dataloader(args, config, attack_type='none', attack_params=None):
-    """Reads pre-aligned images using the current dataset.DATA_DIR and CSV_PATH."""
-    num_workers = getattr(args, 'num_workers', 4)
-    aligned_ds = dataset.DeepFakeDataset(
-        file_pattern="**/*.*g",
-        input_size=config["input_size"],
-        is_train=False,
-        is_val=False,
-        reals_name=args.reals,
-        use_augs=False,
-        attack_type=attack_type,
-        attack_params=attack_params or {},
-    )
-    return torch.utils.data.DataLoader(
-        aligned_ds,
-        batch_size=64,
-        shuffle=False,
-        num_workers=num_workers,
-        drop_last=False,
-        pin_memory=True,
-    ), {v: k for k, v in aligned_ds.class_to_idx.items()}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -325,25 +299,19 @@ def evaluate(args):
         # ('random_crop', {'crop_ratio': 0.95}),
     ]
 
-    mode_label = "aligned eval" if args.align_mode else "standard eval"
-
     for attack_type, attack_params in attacks_configs:
         print(f"\n{'='*60}")
-        print(f"[{mode_label}]  Attack: {attack_type} {attack_params}")
+        print(f"Attack: {attack_type} {attack_params}")
         print(f"{'='*60}\n")
 
-        if args.align_mode:
-            test_dataloader, class2idx = build_aligned_test_dataloader(
-                args, config, attack_type, attack_params)
-        else:
-            class Options:
-                isTrain = False
-                isVal   = False
-                batch_size = 64
-            opt = Options()
-            opt.attack_type   = attack_type
-            opt.attack_params = attack_params
-            test_dataloader, class2idx = create_dataloader(args, config, opt)
+        class Options:
+            isTrain = False
+            isVal   = False
+            batch_size = 64
+        opt = Options()
+        opt.attack_type   = attack_type
+        opt.attack_params = attack_params
+        test_dataloader, class2idx = create_dataloader(args, config, opt)
 
         eval_once(test_dataloader, model,
                   class2idx=class2idx, threshold_info=threshold_info)

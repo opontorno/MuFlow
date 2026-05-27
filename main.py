@@ -165,8 +165,7 @@ def _cleanup_temp(temp_dir):
         print(f"[champion] Removed temp folder: {temp_dir}")
 
 
-def _build_metrics_json(run_name, canonical_dir, epoch, reference_metric,
-                        std_metrics, aligned_metrics):
+def _build_metrics_json(run_name, canonical_dir, epoch, reference_metric, metrics):
     """Assemble the best_metrics.json payload."""
     def _r(x, d=6):
         return round(float(x), d)
@@ -176,8 +175,7 @@ def _build_metrics_json(run_name, canonical_dir, epoch, reference_metric,
         'canonical_name':   os.path.basename(canonical_dir),
         'epoch':            int(epoch),
         'reference_metric': _r(reference_metric),
-        'standard':         std_metrics,
-        'aligned':          aligned_metrics,   # None when align_mode=0
+        'metrics':          metrics,
     }
 
 
@@ -252,7 +250,7 @@ def build_model(config, args):
     pooling_type = config.get("pooling_type", "mean")
     n_components = config.get("gmm_n_components", 1)
 
-    gmm_parameters = f"{const.WORKING_DIR}/parameters/{'aligned_' if args.align_mode else ''}{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
+    gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
 
     if not os.path.exists(gmm_parameters):
         print(f"GMM parameters not found at {gmm_parameters}.")
@@ -850,10 +848,9 @@ def train(args, config, canonical_checkpoint_dir):
                         save_dict[key] = threshold_info[key]
                 np.savez(os.path.join(checkpoint_dir, "thresholds.npz"), **save_dict)
 
-                preds_suffix = "_aligned" if args.align_mode else ""
-                np.save(os.path.join(checkpoint_dir, f"preds_best{preds_suffix}.npy"), preds)
-                np.save(os.path.join(checkpoint_dir, f"labels_best{preds_suffix}.npy"), labels)
-                with open(os.path.join(checkpoint_dir, f"class2idx_best{preds_suffix}.json"), 'w') as _f:
+                np.save(os.path.join(checkpoint_dir, "preds_best.npy"), preds)
+                np.save(os.path.join(checkpoint_dir, "labels_best.npy"), labels)
+                with open(os.path.join(checkpoint_dir, "class2idx_best.json"), 'w') as _f:
                     json.dump({int(k): v for k, v in class2idx.items()}, _f)
 
                 if 'lof' in threshold_info:
@@ -865,8 +862,7 @@ def train(args, config, canonical_checkpoint_dir):
                     canonical_dir=canonical_checkpoint_dir,
                     epoch=epoch,
                     reference_metric=current_metric,
-                    std_metrics=eval_metrics if not args.align_mode else None,
-                    aligned_metrics=eval_metrics if args.align_mode else None,
+                    metrics=eval_metrics,
                 )
                 with open(os.path.join(checkpoint_dir, 'best_metrics.json'), 'w') as _f:
                     json.dump(metrics_payload, _f, indent=2)
@@ -895,16 +891,12 @@ def train(args, config, canonical_checkpoint_dir):
 
 if __name__ == "__main__":
     args = parse_args()
-    args.align_mode = 'aligned' in const.DATA_DIR
     config = yaml.safe_load(open(args.config, "r"))
     pprint(vars(args))
     pprint(config)
 
     # ── Canonical run name (no hyperparams) ─────────────────────────────────
-    canonical_run_name = f"{config['backbone_name']}_{args.data}_{args.reals}"
-    if args.align_mode:
-        canonical_run_name += "_aligned"
-    canonical_run_name += f"_{config['pooling_type']}"
+    canonical_run_name = f"{config['backbone_name']}_{args.data}_{args.reals}_{config['pooling_type']}"
     if args.use_lof:
         canonical_run_name += "_lof"
     else:

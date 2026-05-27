@@ -15,8 +15,8 @@ from muflow import constants as const
 from tqdm import tqdm
 import pdb
 
-PREFIX = "aligned_"
-MEANS_DIR = os.path.join(const.DATA_DIR, "aligned_means", "500")
+PREFIX = ""
+MEANS_DIR = os.path.join(const.DATA_DIR, "means", "500")
 
 # === Argument Parser ===
 parser = argparse.ArgumentParser(description='Generate GMM parameters for FastFlow')
