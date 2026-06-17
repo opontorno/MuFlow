@@ -4,11 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="µFlow: Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors">
-  <meta property="og:title" content="µFlow">
-  <meta property="og:description" content="Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors">
+  <meta property="og:title" content="µFlow — Deepfake Detection">
+  <meta property="og:description" content="One-class deepfake detector trained only on real images, leveraging average images and normalizing flows.">
   <title>µFlow</title>
 
-  <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Noto+Sans:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
@@ -17,8 +17,8 @@
 
 <body>
 
-<!-- ═══════════════════════════ NAVBAR ═══════════════════════════ -->
-<nav class="navbar is-fixed-top" role="navigation" aria-label="main navigation">
+<!-- ═══════════════ NAVBAR ═══════════════ -->
+<nav class="navbar is-fixed-top" role="navigation">
   <div class="navbar-brand">
     <a class="navbar-item brand-name" href="#">µFlow</a>
     <a role="button" class="navbar-burger" aria-label="menu" aria-expanded="false" data-target="navMenu">
@@ -31,203 +31,111 @@
     <div class="navbar-end">
       <a class="navbar-item nav-link" href="#abstract">Abstract</a>
       <a class="navbar-item nav-link" href="#method">Method</a>
-      <a class="navbar-item nav-link" href="#results">Results</a>
       <a class="navbar-item nav-link" href="#bibtex">BibTeX</a>
     </div>
   </div>
 </nav>
 
-<!-- ═══════════════════════════ HERO ═══════════════════════════ -->
-<section class="hero hero-section">
-  <div class="hero-body">
-    <div class="container is-max-desktop has-text-centered">
+<!-- ═══════════════ HERO ═══════════════ -->
+<section class="hero-section">
+  <div class="container is-max-desktop has-text-centered">
 
-      <h1 class="paper-title">
-        µFlow: Leveraging Average Images for Improving<br>Generalisation of Deepfake Faces Detectors
-      </h1>
+    <p class="paper-venue">Conference / Workshop &mdash; Year</p>
 
-      <!-- Authors -->
-      <div class="authors" style="margin-top: 1.5rem; font-size: 1.15rem;">
-        <span class="author-block"><a href="#">Orazio Pontorno</a><sup>1</sup>,</span>
-        <span class="author-block"><a href="#">Mattia Litrico</a><sup>1</sup>,</span>
-        <span class="author-block"><a href="#">Luca Guarnera</a><sup>1</sup>,</span>
-        <span class="author-block"><a href="#">Valerio Giuffrida</a><sup>2</sup>,</span>
-        <span class="author-block"><a href="#">Sebastiano Battiato</a><sup>1</sup></span>
-      </div>
+    <h1 class="paper-title">
+      µFlow: Leveraging Average Images for Improving<br>
+      Generalisation of Deepfake Faces Detectors
+    </h1>
 
-      <!-- Affiliations -->
-      <div class="affiliations" style="margin-top: 0.8rem;">
-        <sup>1</sup> University of Catania &nbsp;&nbsp;&nbsp;
-        <sup>2</sup> University of Nottingham
-      </div>
-
-      <!-- Venue badge -->
-      <div style="margin-top: 1.2rem;">
-        <span class="venue-badge">
-          <i class="fas fa-award" style="margin-right: 6px;"></i>
-          Conference / Workshop &mdash; Year
-        </span>
-      </div>
-
-      <!-- Action buttons -->
-      <div class="buttons is-centered" style="margin-top: 2rem; flex-wrap: wrap; gap: 8px;">
-        <a class="button action-btn is-rounded" href="#" target="_blank">
-          <span class="icon"><i class="ai ai-arxiv"></i></span>
-          <span>arXiv</span>
-        </a>
-        <a class="button action-btn is-rounded" href="https://github.com/opontorno/MuFlow" target="_blank">
-          <span class="icon"><i class="fab fa-github"></i></span>
-          <span>Code</span>
-        </a>
-        <a class="button action-btn is-rounded" href="#" target="_blank">
-          <span class="icon"><i class="far fa-file-pdf"></i></span>
-          <span>Paper</span>
-        </a>
-      </div>
-
+    <!-- Authors -->
+    <div class="authors">
+      <span class="author-block"><a href="https://opontorno.github.io/">Orazio Pontorno</a><sup>1</sup>,</span>
+      <span class="author-block"><a href="https://www.mattialitrico.com/">Mattia Litrico</a><sup>1</sup>,</span>
+      <span class="author-block"><a href="https://www.dmi.unict.it/lguarnera/">Luca Guarnera</a><sup>1</sup>,</span>
+      <span class="author-block"><a href="https://www.valeriogiuffrida.academy/wp/">Valerio Giuffrida</a><sup>2</sup>,</span>
+      <span class="author-block"><a href="https://www.dmi.unict.it/~battiato/">Sebastiano Battiato</a><sup>1</sup></span>
     </div>
+
+    <div class="affiliations">
+      <sup>1</sup>&thinsp;University of Catania &ensp;
+      <sup>2</sup>&thinsp;University of Nottingham
+    </div>
+
+    <!-- Buttons -->
+    <div class="hero-buttons">
+      <!-- <a class="hero-btn" href="#" target="_blank">
+        <i class="ai ai-arxiv"></i> arXiv
+      </a> -->
+      <a class="hero-btn hero-btn--github" href="https://github.com/opontorno/MuFlow" target="_blank">
+        <i class="fab fa-github"></i> Code (coming soon)
+      </a>
+      <a class="hero-btn" href="#" target="_blank">
+        <i class="far fa-file-pdf"></i> Paper
+      </a>
+    </div>
+
   </div>
 </section>
 
-<div class="gradient-divider"></div>
-
-<!-- ═══════════════════════════ TEASER ═══════════════════════════ -->
-<section class="section" style="padding-top: 3rem; padding-bottom: 2rem;">
+<!-- ═══════════════ ABSTRACT ═══════════════ -->
+<section class="page-section" id="abstract">
   <div class="container is-max-desktop">
-    <figure class="image-placeholder">
-      <i class="fas fa-image fa-3x"></i>
-      <p>Teaser Figure</p>
-      <p class="placeholder-sub">Replace with <code>static/images/teaser.png</code></p>
-    </figure>
-    <!-- Uncomment and replace path when ready:
-    <figure class="image">
-      <img src="static/images/teaser.png" alt="µFlow teaser">
-    </figure>
-    -->
-    <p class="fig-caption">
-      <b>Figure 1.</b> Brief caption describing the key idea or main result of µFlow.
-    </p>
-  </div>
-</section>
-
-<!-- ═══════════════════════════ ABSTRACT ═══════════════════════════ -->
-<section class="section section-alt" id="abstract">
-  <div class="container is-max-desktop">
-    <h2 class="section-title has-text-centered">Abstract</h2>
-    <div class="title-underline"></div>
+    <h2 class="section-title">Abstract</h2>
+    <div class="section-rule"></div>
     <p class="abstract-text">
-      <!-- Paste your abstract here -->
-      Lorem ipsum dolor sit amet, consectetur adipiscing elit. Replace this placeholder with your
-      paper abstract (typically 150&ndash;250 words). Describe the problem, your key insight
-      (leveraging average images within a normalizing-flow framework), the proposed µFlow pipeline,
-      and the main experimental findings on generalisation to unseen generators.
+      Current generative models, including GANs and diffusion models, have reached an outstanding level of photorealism, posing significant risks to privacy and security. To ensure real-world applicability, deepfake detectors must generalise effectively to unseen generators. However, most existing approaches rely on supervised training with both real and fake images, which limits their generalisation especially across generator categories (e.g. GANs vs DMs).
+    </p>
+    <p class="abstract-text" style="margin-top: 1rem;">
+      In this work, we introduce <strong><em>µFlow</em></strong>, a one-class deepfake detector trained only on real images without relying on pseudo-deepfakes or synthetic artifacts. Our approach builds on the observation that averaging multiple images amplifies consistent generative traces, producing highly discriminative feature representations. We leverage this property by modelling the distribution of features extracted from averaged images and training a normalizing flow to align the feature space of individual images with this distribution. This alignment yields a likelihood-based criterion that separates real and fake samples while promoting strong generalisation.
+    </p>
+    <p class="abstract-text" style="margin-top: 1rem;">
+      We evaluate <strong><em>µFlow</em></strong> on a fully out-of-distribution setting, where both real and fake datasets are unseen during training. Experimental results show that our method significantly outperforms state-of-the-art detectors.
     </p>
   </div>
 </section>
 
-<div class="gradient-divider"></div>
-
-<!-- ═══════════════════════════ METHOD ═══════════════════════════ -->
-<section class="section" id="method">
+<!-- ═══════════════ METHOD ═══════════════ -->
+<section class="page-section section-tinted" id="method">
   <div class="container is-max-desktop">
-    <h2 class="section-title has-text-centered">Method</h2>
-    <div class="title-underline"></div>
+    <h2 class="section-title">Method</h2>
+    <div class="section-rule"></div>
 
-    <figure class="image-placeholder" style="margin-bottom: 0.5rem;">
-      <i class="fas fa-project-diagram fa-3x"></i>
-      <p>Pipeline / Architecture Figure</p>
-      <p class="placeholder-sub">Replace with <code>static/images/method.png</code></p>
+    <!-- Pipeline figure -->
+    <figure class="paper-figure">
+      <img src="static/images/pipeline.png" alt="µFlow pipeline overview">
+      <figcaption>
+        <strong>Figure 1 — µFlow graphical overview.</strong>
+        <em>(a) Discriminative Space Learning:</em> We learn a discriminative latent space by
+        extracting features from average real images, modelled with a Gaussian Mixture Model.
+        <em>(b) FastFlow Training:</em> We train FastFlow to project representations extracted
+        from real images into the learned discriminative space.
+        <em>(c) Inference:</em> At test time, the representation of a real image is mapped to a
+        high-likelihood region of the latent space, while fake images are mapped to low-likelihood
+        regions.
+      </figcaption>
     </figure>
-    <!-- Uncomment when ready:
-    <figure class="image">
-      <img src="static/images/method.png" alt="µFlow architecture">
+
+    <!-- t-SNE / features figure -->
+    <figure class="paper-figure" style="margin-top: 3rem;">
+      <img src="static/images/features.png" alt="t-SNE feature analysis">
+      <figcaption>
+        <strong>Figure 2 — t-SNE analysis.</strong>
+        <em>(a)</em> Features extracted from single images.
+        <em>(b)</em> Features extracted from the average of images.
+        The space of the average images exhibits higher inter-class variability,
+        yielding greater discriminative power for deepfake detection.
+      </figcaption>
     </figure>
-    -->
-    <p class="fig-caption">
-      <b>Figure 2.</b> Overview of the µFlow pipeline.
-      The backbone extracts multi-scale features from the input image and from pre-computed
-      average images. A normalizing flow models the real-image distribution; anomaly score
-      is the negative log-likelihood.
-    </p>
-
-    <div class="content method-text" style="margin-top: 2rem;">
-      <p>
-        <!-- Brief method description — expand as needed -->
-        <b>Feature extraction.</b> µFlow builds on a frozen backbone (CNN or ViT) to extract
-        multi-scale feature maps. Average images computed from the training real set are used
-        as stable reference representations.
-      </p>
-      <p>
-        <b>Normalizing flows.</b> FastFlow coupling layers learn a bijective mapping from the
-        feature space to a Gaussian latent space. The anomaly score for a test image is its
-        negative log-likelihood under this learned distribution.
-      </p>
-      <p>
-        <b>GMM prior.</b> Gaussian Mixture Models fitted on pooled real features provide
-        class-conditional priors that improve calibration and generalisation to unseen generators.
-      </p>
-    </div>
-  </div>
-</section>
-
-<div class="gradient-divider"></div>
-
-<!-- ═══════════════════════════ RESULTS ═══════════════════════════ -->
-<section class="section section-alt" id="results">
-  <div class="container is-max-desktop">
-    <h2 class="section-title has-text-centered">Results</h2>
-    <div class="title-underline"></div>
-
-    <!-- Key metrics highlight -->
-    <div class="columns is-centered metrics-row" style="margin-bottom: 2.5rem;">
-      <div class="column is-one-third has-text-centered">
-        <p class="metric-value">&mdash;</p>
-        <p class="metric-label">Mean ROC AUC</p>
-      </div>
-      <div class="column is-one-third has-text-centered">
-        <p class="metric-value">&mdash;</p>
-        <p class="metric-label">Mean AP</p>
-      </div>
-      <div class="column is-one-third has-text-centered">
-        <p class="metric-value">&mdash;</p>
-        <p class="metric-label">Mean Accuracy</p>
-      </div>
-    </div>
-
-    <!-- Results figure -->
-    <figure class="image-placeholder">
-      <i class="fas fa-chart-bar fa-3x"></i>
-      <p>Quantitative Results</p>
-      <p class="placeholder-sub">Replace with <code>static/images/results.png</code></p>
-    </figure>
-    <p class="fig-caption">
-      <b>Table 1 / Figure 3.</b> Comparison with state-of-the-art deepfake detectors on the WILD benchmark.
-    </p>
-
-    <!-- Qualitative results -->
-    <figure class="image-placeholder" style="margin-top: 2rem;">
-      <i class="fas fa-images fa-3x"></i>
-      <p>Qualitative Results</p>
-      <p class="placeholder-sub">Replace with <code>static/images/qualitative.png</code></p>
-    </figure>
-    <p class="fig-caption">
-      <b>Figure 4.</b> Qualitative examples of likelihood score distributions across GAN and
-      diffusion-model generators.
-    </p>
 
   </div>
 </section>
 
-<div class="gradient-divider"></div>
-
-<!-- ═══════════════════════════ BIBTEX ═══════════════════════════ -->
-<section class="section" id="bibtex">
+<!-- ═══════════════ BIBTEX ═══════════════ -->
+<section class="page-section" id="bibtex">
   <div class="container is-max-desktop">
-    <h2 class="section-title has-text-centered">BibTeX</h2>
-    <div class="title-underline"></div>
-    <p style="text-align: center; color: #666; margin-bottom: 1.5rem; font-size: 0.95rem;">
-      If you find our work useful, please consider citing:
-    </p>
+    <h2 class="section-title">BibTeX</h2>
+    <div class="section-rule"></div>
+    <p class="bibtex-intro">If you find our work useful, please consider citing:</p>
     <div class="bibtex-wrapper">
       <button class="copy-btn" onclick="copyBibtex()" id="copy-btn">
         <i class="far fa-copy"></i>&nbsp;Copy
@@ -245,17 +153,13 @@
   </div>
 </section>
 
-<!-- ═══════════════════════════ FOOTER ═══════════════════════════ -->
-<footer class="footer-section">
+<!-- ═══════════════ FOOTER ═══════════════ -->
+<footer class="page-footer">
   <div class="container has-text-centered">
-    <p>
-      &copy; 2025 &middot; University of Catania &middot; University of Nottingham
-    </p>
-    <p style="margin-top: 0.5rem; font-size: 0.85rem; opacity: 0.7;">
-      Website template adapted from
-      <a href="https://nerfies.github.io" target="_blank" style="color: #90caf9;">Nerfies</a>.
-      Licensed under
-      <a href="http://creativecommons.org/licenses/by-sa/4.0/" target="_blank" style="color: #90caf9;">CC BY-SA 4.0</a>.
+    <p>&copy; 2025 &middot; University of Catania &middot; University of Nottingham</p>
+    <p class="footer-sub">
+      Template adapted from <a href="https://nerfies.github.io" target="_blank">Nerfies</a>.
+      Licensed under <a href="http://creativecommons.org/licenses/by-sa/4.0/" target="_blank">CC BY-SA 4.0</a>.
     </p>
   </div>
 </footer>
