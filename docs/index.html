@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="µFlow: Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors">
+  <meta property="og:title" content="µFlow">
+  <meta property="og:description" content="Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors">
+  <title>µFlow</title>
+
+  <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Noto+Sans:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="static/css/style.css">
+</head>
+
+<body>
+
+<!-- ═══════════════════════════ NAVBAR ═══════════════════════════ -->
+<nav class="navbar is-fixed-top" role="navigation" aria-label="main navigation">
+  <div class="navbar-brand">
+    <a class="navbar-item brand-name" href="#">µFlow</a>
+    <a role="button" class="navbar-burger" aria-label="menu" aria-expanded="false" data-target="navMenu">
+      <span aria-hidden="true"></span>
+      <span aria-hidden="true"></span>
+      <span aria-hidden="true"></span>
+    </a>
+  </div>
+  <div id="navMenu" class="navbar-menu">
+    <div class="navbar-end">
+      <a class="navbar-item nav-link" href="#abstract">Abstract</a>
+      <a class="navbar-item nav-link" href="#method">Method</a>
+      <a class="navbar-item nav-link" href="#results">Results</a>
+      <a class="navbar-item nav-link" href="#bibtex">BibTeX</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════ HERO ═══════════════════════════ -->
+<section class="hero hero-section">
+  <div class="hero-body">
+    <div class="container is-max-desktop has-text-centered">
+
+      <h1 class="paper-title">
+        µFlow: Leveraging Average Images for Improving<br>Generalisation of Deepfake Faces Detectors
+      </h1>
+
+      <!-- Authors -->
+      <div class="authors" style="margin-top: 1.5rem; font-size: 1.15rem;">
+        <span class="author-block"><a href="#">Orazio Pontorno</a><sup>1</sup>,</span>
+        <span class="author-block"><a href="#">Mattia Litrico</a><sup>1</sup>,</span>
+        <span class="author-block"><a href="#">Luca Guarnera</a><sup>1</sup>,</span>
+        <span class="author-block"><a href="#">Valerio Giuffrida</a><sup>2</sup>,</span>
+        <span class="author-block"><a href="#">Sebastiano Battiato</a><sup>1</sup></span>
+      </div>
+
+      <!-- Affiliations -->
+      <div class="affiliations" style="margin-top: 0.8rem;">
+        <sup>1</sup> University of Catania &nbsp;&nbsp;&nbsp;
+        <sup>2</sup> University of Nottingham
+      </div>
+
+      <!-- Venue badge -->
+      <div style="margin-top: 1.2rem;">
+        <span class="venue-badge">
+          <i class="fas fa-award" style="margin-right: 6px;"></i>
+          Conference / Workshop &mdash; Year
+        </span>
+      </div>
+
+      <!-- Action buttons -->
+      <div class="buttons is-centered" style="margin-top: 2rem; flex-wrap: wrap; gap: 8px;">
+        <a class="button action-btn is-rounded" href="#" target="_blank">
+          <span class="icon"><i class="ai ai-arxiv"></i></span>
+          <span>arXiv</span>
+        </a>
+        <a class="button action-btn is-rounded" href="https://github.com/opontorno/MuFlow" target="_blank">
+          <span class="icon"><i class="fab fa-github"></i></span>
+          <span>Code</span>
+        </a>
+        <a class="button action-btn is-rounded" href="#" target="_blank">
+          <span class="icon"><i class="far fa-file-pdf"></i></span>
+          <span>Paper</span>
+        </a>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<div class="gradient-divider"></div>
+
+<!-- ═══════════════════════════ TEASER ═══════════════════════════ -->
+<section class="section" style="padding-top: 3rem; padding-bottom: 2rem;">
+  <div class="container is-max-desktop">
+    <figure class="image-placeholder">
+      <i class="fas fa-image fa-3x"></i>
+      <p>Teaser Figure</p>
+      <p class="placeholder-sub">Replace with <code>static/images/teaser.png</code></p>
+    </figure>
+    <!-- Uncomment and replace path when ready:
+    <figure class="image">
+      <img src="static/images/teaser.png" alt="µFlow teaser">
+    </figure>
+    -->
+    <p class="fig-caption">
+      <b>Figure 1.</b> Brief caption describing the key idea or main result of µFlow.
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ ABSTRACT ═══════════════════════════ -->
+<section class="section section-alt" id="abstract">
+  <div class="container is-max-desktop">
+    <h2 class="section-title has-text-centered">Abstract</h2>
+    <div class="title-underline"></div>
+    <p class="abstract-text">
+      <!-- Paste your abstract here -->
+      Lorem ipsum dolor sit amet, consectetur adipiscing elit. Replace this placeholder with your
+      paper abstract (typically 150&ndash;250 words). Describe the problem, your key insight
+      (leveraging average images within a normalizing-flow framework), the proposed µFlow pipeline,
+      and the main experimental findings on generalisation to unseen generators.
+    </p>
+  </div>
+</section>
+
+<div class="gradient-divider"></div>
+
+<!-- ═══════════════════════════ METHOD ═══════════════════════════ -->
+<section class="section" id="method">
+  <div class="container is-max-desktop">
+    <h2 class="section-title has-text-centered">Method</h2>
+    <div class="title-underline"></div>
+
+    <figure class="image-placeholder" style="margin-bottom: 0.5rem;">
+      <i class="fas fa-project-diagram fa-3x"></i>
+      <p>Pipeline / Architecture Figure</p>
+      <p class="placeholder-sub">Replace with <code>static/images/method.png</code></p>
+    </figure>
+    <!-- Uncomment when ready:
+    <figure class="image">
+      <img src="static/images/method.png" alt="µFlow architecture">
+    </figure>
+    -->
+    <p class="fig-caption">
+      <b>Figure 2.</b> Overview of the µFlow pipeline.
+      The backbone extracts multi-scale features from the input image and from pre-computed
+      average images. A normalizing flow models the real-image distribution; anomaly score
+      is the negative log-likelihood.
+    </p>
+
+    <div class="content method-text" style="margin-top: 2rem;">
+      <p>
+        <!-- Brief method description — expand as needed -->
+        <b>Feature extraction.</b> µFlow builds on a frozen backbone (CNN or ViT) to extract
+        multi-scale feature maps. Average images computed from the training real set are used
+        as stable reference representations.
+      </p>
+      <p>
+        <b>Normalizing flows.</b> FastFlow coupling layers learn a bijective mapping from the
+        feature space to a Gaussian latent space. The anomaly score for a test image is its
+        negative log-likelihood under this learned distribution.
+      </p>
+      <p>
+        <b>GMM prior.</b> Gaussian Mixture Models fitted on pooled real features provide
+        class-conditional priors that improve calibration and generalisation to unseen generators.
+      </p>
+    </div>
+  </div>
+</section>
+
+<div class="gradient-divider"></div>
+
+<!-- ═══════════════════════════ RESULTS ═══════════════════════════ -->
+<section class="section section-alt" id="results">
+  <div class="container is-max-desktop">
+    <h2 class="section-title has-text-centered">Results</h2>
+    <div class="title-underline"></div>
+
+    <!-- Key metrics highlight -->
+    <div class="columns is-centered metrics-row" style="margin-bottom: 2.5rem;">
+      <div class="column is-one-third has-text-centered">
+        <p class="metric-value">&mdash;</p>
+        <p class="metric-label">Mean ROC AUC</p>
+      </div>
+      <div class="column is-one-third has-text-centered">
+        <p class="metric-value">&mdash;</p>
+        <p class="metric-label">Mean AP</p>
+      </div>
+      <div class="column is-one-third has-text-centered">
+        <p class="metric-value">&mdash;</p>
+        <p class="metric-label">Mean Accuracy</p>
+      </div>
+    </div>
+
+    <!-- Results figure -->
+    <figure class="image-placeholder">
+      <i class="fas fa-chart-bar fa-3x"></i>
+      <p>Quantitative Results</p>
+      <p class="placeholder-sub">Replace with <code>static/images/results.png</code></p>
+    </figure>
+    <p class="fig-caption">
+      <b>Table 1 / Figure 3.</b> Comparison with state-of-the-art deepfake detectors on the WILD benchmark.
+    </p>
+
+    <!-- Qualitative results -->
+    <figure class="image-placeholder" style="margin-top: 2rem;">
+      <i class="fas fa-images fa-3x"></i>
+      <p>Qualitative Results</p>
+      <p class="placeholder-sub">Replace with <code>static/images/qualitative.png</code></p>
+    </figure>
+    <p class="fig-caption">
+      <b>Figure 4.</b> Qualitative examples of likelihood score distributions across GAN and
+      diffusion-model generators.
+    </p>
+
+  </div>
+</section>
+
+<div class="gradient-divider"></div>
+
+<!-- ═══════════════════════════ BIBTEX ═══════════════════════════ -->
+<section class="section" id="bibtex">
+  <div class="container is-max-desktop">
+    <h2 class="section-title has-text-centered">BibTeX</h2>
+    <div class="title-underline"></div>
+    <p style="text-align: center; color: #666; margin-bottom: 1.5rem; font-size: 0.95rem;">
+      If you find our work useful, please consider citing:
+    </p>
+    <div class="bibtex-wrapper">
+      <button class="copy-btn" onclick="copyBibtex()" id="copy-btn">
+        <i class="far fa-copy"></i>&nbsp;Copy
+      </button>
+<pre class="bibtex-box" id="bibtex-content">@inproceedings{pontorno2025muflow,
+  title     = {{\textmu}Flow: Leveraging Average Images for
+               Improving Generalisation of Deepfake Faces Detectors},
+  author    = {Pontorno, Orazio and Litrico, Mattia and
+               Guarnera, Luca and Giuffrida, Valerio and
+               Battiato, Sebastiano},
+  booktitle = {Proceedings of ... (Conference Name)},
+  year      = {2025},
+}</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════ FOOTER ═══════════════════════════ -->
+<footer class="footer-section">
+  <div class="container has-text-centered">
+    <p>
+      &copy; 2025 &middot; University of Catania &middot; University of Nottingham
+    </p>
+    <p style="margin-top: 0.5rem; font-size: 0.85rem; opacity: 0.7;">
+      Website template adapted from
+      <a href="https://nerfies.github.io" target="_blank" style="color: #90caf9;">Nerfies</a>.
+      Licensed under
+      <a href="http://creativecommons.org/licenses/by-sa/4.0/" target="_blank" style="color: #90caf9;">CC BY-SA 4.0</a>.
+    </p>
+  </div>
+</footer>
+
+<script src="static/js/index.js"></script>
+</body>
+</html>

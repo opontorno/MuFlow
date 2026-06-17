@@ -1,0 +1,243 @@
+/* ═══════════════════════════════════════════════════════════
+   µFlow Project Page — Stylesheet
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Base ── */
+html { scroll-behavior: smooth; }
+
+body {
+  font-family: 'Noto Sans', sans-serif;
+  color: #2d2d2d;
+  padding-top: 52px; /* navbar height */
+}
+
+/* ── Navbar ── */
+.navbar {
+  background: #12122a;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+}
+
+.brand-name {
+  color: #e0e0ff !important;
+  font-family: 'Google Sans', sans-serif;
+  font-size: 1.2rem;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.nav-link {
+  color: #b0b8d0 !important;
+  font-size: 0.95rem;
+  transition: color 0.2s;
+}
+.nav-link:hover { color: #ffffff !important; }
+.is-active-nav { color: #ffffff !important; border-bottom: 2px solid #64b5f6; }
+
+.navbar-burger span { background-color: #b0b8d0; }
+
+/* ── Hero ── */
+.hero-section .hero-body {
+  background: linear-gradient(135deg, #0d0d1f 0%, #12122a 40%, #0f2a4a 100%);
+  padding: 5rem 1.5rem 4.5rem;
+}
+
+.paper-title {
+  font-family: 'Google Sans', sans-serif;
+  font-size: clamp(1.6rem, 3.5vw, 2.6rem);
+  font-weight: 700;
+  color: #ffffff;
+  line-height: 1.35;
+}
+
+.authors { color: #d0d8f0; }
+
+.author-block {
+  display: inline-block;
+  margin: 0 6px;
+}
+.author-block a {
+  color: #a8c8f8;
+  font-weight: 500;
+  text-decoration: none;
+  transition: color 0.2s;
+}
+.author-block a:hover { color: #ffffff; text-decoration: underline; }
+
+.affiliations {
+  color: #8899bb;
+  font-size: 0.95rem;
+  margin-top: 0.5rem;
+}
+
+.venue-badge {
+  display: inline-block;
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 20px;
+  padding: 6px 18px;
+  color: #c8d8f8;
+  font-size: 0.92rem;
+}
+
+.action-btn {
+  background: rgba(255,255,255,0.1) !important;
+  border: 1px solid rgba(255,255,255,0.3) !important;
+  color: #e0e8ff !important;
+  font-weight: 500;
+  transition: all 0.2s;
+  min-width: 110px;
+}
+.action-btn:hover {
+  background: rgba(255,255,255,0.22) !important;
+  color: #ffffff !important;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+/* ── Divider ── */
+.gradient-divider {
+  height: 3px;
+  background: linear-gradient(90deg, #0d0d1f, #1a5276, #0d0d1f);
+}
+
+/* ── Sections ── */
+.section { padding: 4rem 1.5rem; }
+
+.section-alt { background: #f7f8fc; }
+
+.section-title {
+  font-family: 'Google Sans', sans-serif;
+  font-size: 2rem;
+  font-weight: 700;
+  color: #12122a;
+  margin-bottom: 0.6rem;
+}
+
+.title-underline {
+  width: 60px;
+  height: 3px;
+  background: linear-gradient(90deg, #1a5276, #2980b9);
+  border-radius: 2px;
+  margin: 0 auto 2rem;
+}
+
+/* ── Abstract ── */
+.abstract-text {
+  font-size: 1.05rem;
+  line-height: 1.85;
+  color: #3a3a4a;
+  text-align: justify;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+/* ── Method ── */
+.method-text p {
+  font-size: 1.02rem;
+  line-height: 1.8;
+  color: #3a3a4a;
+  margin-bottom: 1rem;
+}
+
+/* ── Figures ── */
+.image-placeholder {
+  background: #f0f2f7;
+  border: 2px dashed #c0c8d8;
+  border-radius: 10px;
+  padding: 60px 20px;
+  text-align: center;
+  color: #8899aa;
+}
+.image-placeholder i { margin-bottom: 12px; display: block; color: #aabbcc; }
+.image-placeholder p { font-size: 1rem; font-weight: 500; }
+.placeholder-sub {
+  font-size: 0.82rem !important;
+  font-weight: 400 !important;
+  color: #aabbcc !important;
+  margin-top: 4px !important;
+}
+.placeholder-sub code {
+  background: #e4e8f0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  color: #556677;
+}
+
+.fig-caption {
+  text-align: center;
+  color: #667788;
+  font-size: 0.92rem;
+  font-style: italic;
+  margin-top: 0.9rem;
+  line-height: 1.6;
+}
+
+/* ── Results metrics ── */
+.metrics-row { border-bottom: 1px solid #dde4ee; padding-bottom: 2rem; }
+
+.metric-value {
+  font-family: 'Google Sans', sans-serif;
+  font-size: 2.8rem;
+  font-weight: 700;
+  color: #0f2a4a;
+  line-height: 1;
+  margin-bottom: 0.3rem;
+}
+.metric-label {
+  color: #667788;
+  font-size: 0.9rem;
+  letter-spacing: 0.5px;
+}
+
+/* ── BibTeX ── */
+.bibtex-wrapper {
+  position: relative;
+}
+
+.bibtex-box {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border-radius: 10px;
+  padding: 28px 24px;
+  font-family: 'Courier New', 'Lucida Console', monospace;
+  font-size: 0.88rem;
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre;
+  border: 1px solid #313244;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+}
+
+.copy-btn {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  background: #45475a;
+  color: #cdd6f4;
+  border: none;
+  border-radius: 5px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  transition: background 0.2s;
+  z-index: 1;
+}
+.copy-btn:hover { background: #585b70; }
+
+/* ── Footer ── */
+.footer-section {
+  background: #12122a;
+  color: #8899bb;
+  padding: 2.5rem 1.5rem;
+}
+.footer-section a { color: #90caf9; }
+.footer-section a:hover { color: #ffffff; }
+
+/* ── Responsive ── */
+@media (max-width: 768px) {
+  .paper-title { font-size: 1.5rem; }
+  .author-block { display: block; margin: 2px 0; }
+  .metric-value { font-size: 2rem; }
+  .bibtex-box { font-size: 0.78rem; }
+}
