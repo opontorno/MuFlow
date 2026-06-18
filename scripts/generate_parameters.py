@@ -1,22 +1,17 @@
 import torch
 import os
-import torch.nn as nn
 import numpy as np
 from glob import glob
-import matplotlib.pyplot as plt
-from PIL import Image, ImageFile
-import random
+from PIL import Image
 import timm
 import yaml
 import argparse
-from sklearn.manifold import TSNE
 from sklearn.mixture import GaussianMixture
 from muflow import constants as const
 from tqdm import tqdm
-import pdb
 
 PREFIX = ""
-MEANS_DIR = os.path.join(const.DATA_DIR, "means", "500")
+MEANS_DIR = os.path.join(const.DATA_DIR, "datasets_means", "500")
 
 # === Argument Parser ===
 parser = argparse.ArgumentParser(description='Generate GMM parameters for FastFlow')
@@ -78,11 +73,17 @@ print("Scales:   ", scales)
 num_layers = len(out_indices)
 print(f"Number of layers: {num_layers}")
 
-def _imagenet_normalize(img_t):
-    """Apply ImageNet normalisation to a (1,3,H,W) float tensor in [0,255]."""
+# Normalisation stats matching the backbone (CLIP stats for CLIP, else ImageNet).
+# Must mirror muflow.constants.get_norm_stats so the GMM is fit on the same
+# feature distribution the model sees at train/test time.
+NORM_MEAN, NORM_STD = const.get_norm_stats(model_name)
+
+
+def _normalize(img_t):
+    """Apply backbone-specific normalisation to a (1,3,H,W) float tensor in [0,255]."""
     img_t = img_t / 255.0
-    mean  = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-    std   = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    mean  = torch.tensor(NORM_MEAN).view(1, 3, 1, 1)
+    std   = torch.tensor(NORM_STD).view(1, 3, 1, 1)
     return (img_t - mean) / std
 
 # === Get features ===
@@ -92,14 +93,14 @@ def get_features(img, apply_normalization=False):
 
     Args:
         img: numpy array (RGB uint8)
-        apply_normalization: if True normalise with ImageNet stats (RGB only)
+        apply_normalization: if True normalise with backbone stats (RGB only)
     Returns:
         list of feature tensors (one per layer / block)
     """
     img_t = torch.from_numpy(np.array(img)).permute(2, 0, 1).unsqueeze(0).float()
 
     if apply_normalization:
-        img_t = _imagenet_normalize(img_t)
+        img_t = _normalize(img_t)
 
     with torch.no_grad():
         if backbone_type == 'cait_deit':
@@ -136,17 +137,34 @@ def get_features(img, apply_normalization=False):
                 img_t, n=list(out_indices), reshape=True
             )
         elif backbone_type == 'clip':
-            # CLIPVisualExtractor expects ImageNet-normalised input
-            # and handles its own renormlisation internally
+            # CLIPVisualExtractor expects already-normalised input
+            # (CLIP stats applied above via _normalize)
             return model(img_t)
         else:  # cnn
             return model(img_t)
-            x = x + model.pos_embed
+
+
 def get_features_from_path(path):
     """Load image from path and extract features."""
-    img = np.array(Image.open(path).convert("RGB").resize([config['input_size'], config['input_size']]))
+    img = np.array(Image.open(path).convert("RGB").resize([config['input_size'], config['input_size']], Image.BILINEAR))
     return get_features(img, apply_normalization=True)
 
+
+MEAN_SIZE = os.path.basename(MEANS_DIR.rstrip("/"))  # e.g. "500"
+
+_HOWTO_MEANS = (
+    "\nThe average images are produced by scripts/generate_means.py. Run, e.g.:\n"
+    f"    python scripts/generate_means.py --mean_size {MEAN_SIZE}\n"
+    "(use --num_images N to set how many means per source, --data_root to point "
+    "at a different dataset root). This populates the directory above with one "
+    "subfolder per source (ffhq/, celeba_hq/, and each generator)."
+)
+
+# ── Check that average images have been computed ──────────────────────────────
+if not os.path.isdir(MEANS_DIR):
+    raise FileNotFoundError(
+        f"Average-images directory not found: {MEANS_DIR}\n"
+        f"Compute the average images before generating GMM parameters." + _HOWTO_MEANS)
 
 generators = os.listdir(MEANS_DIR)
 
@@ -155,12 +173,20 @@ for gen in generators:
     patterns_means[gen] = os.path.join(MEANS_DIR, gen, '*.png')
 
 # Select real samples based on reals parameter
-if reals == 'ffhq':
-    real_sample = glob(patterns_means['ffhq'])
-elif reals == 'celeba_hq':
-    real_sample = glob(patterns_means['celeba_hq'])
-else:
-    real_sample = glob(patterns_means['ffhq']) + glob(patterns_means['celeba_hq'])
+required = ['ffhq', 'celeba_hq'] if reals == 'ffhq+celeba_hq' else [reals]
+missing = [r for r in required if r not in patterns_means]
+if missing:
+    raise FileNotFoundError(
+        f"No average-images subfolder(s) for {missing} under {MEANS_DIR}. "
+        f"Available: {sorted(patterns_means.keys())}" + _HOWTO_MEANS)
+
+real_sample = []
+for r in required:
+    real_sample += glob(patterns_means[r])
+
+if len(real_sample) == 0:
+    raise FileNotFoundError(
+        f"No average images (*.png) found for reals='{reals}' under {MEANS_DIR}." + _HOWTO_MEANS)
 
 print(f"Number of real samples: {len(real_sample)}")
 print("Extracting features...")

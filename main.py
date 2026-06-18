@@ -5,25 +5,23 @@ Normalizing-flow training pipeline for one-class deepfake detection.
 """
 import argparse
 from pprint import pprint
-import os, pdb
+import os
 import json
 import shutil
 import subprocess
 import sys
 import time
-import timm
-import torch.nn.functional as F
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import yaml
 import wandb
 import joblib
-import GPUtil
 
 from muflow import constants as const
 from muflow import dataset
 from muflow import model as fastflow
 from muflow import utils
+from muflow.gpu_utils import resolve_device
 
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -90,13 +88,15 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default='configs/resnet50.yaml', help="path to config file")
 
-    parser.add_argument("--data", type=str, default='WILD', help="path to mvtec folder", choices=['FF++', 'WILD', 'progan'])
     parser.add_argument("--reals", type=str, default='ffhq', help="reals dataset", choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'])
     parser.add_argument("--checkpoint", type=str, help="path to load checkpoint")
 
     parser.add_argument('--wandb', default='online', choices=['online', 'offline', 'disabled'])
-    parser.add_argument('--use_augs', action='store_true', help="Enable non-geometric augmentations (ColorJitter, HFlip, GaussianBlur). "
-                             "RandomAffineAug (shift/scale/rotation) is always active during training.")
+    parser.add_argument('--wandb_entity', type=str, default='orazio-mattia',
+                        help="W&B entity (team/user). Default: your default W&B entity.")
+    parser.add_argument('--wandb_project', type=str, default='MuFlow', help="W&B project name.")
+    parser.add_argument('--use_augs', action='store_true', help="Enable RandomHorizontalFlip during training (safe augmentation, zero interpolation). "
+                             "RandomAffine (translate + scale, no rotation) is always active during training via --affine_prob.")
     parser.add_argument('--affine_prob', type=float, default=0.5)
     parser.add_argument('--run_name', type=str)
     parser.add_argument('--eval_interval', type=int, default=1)
@@ -179,36 +179,22 @@ def _build_metrics_json(run_name, canonical_dir, epoch, reference_metric, metric
     }
 
 
-def select_best_gpu():
-    """Automatically select the GPU with the most free memory."""
-    if not torch.cuda.is_available():
-        print("No CUDA GPUs available, using CPU")
-        return None
-    gpus = GPUtil.getGPUs()
-    if not gpus:
-        print("No GPUs found by GPUtil, using cuda:0")
-        return 0
-    best_gpu = max(gpus, key=lambda gpu: gpu.memoryFree)
-    print(f"🎯 Auto-selected GPU {best_gpu.id}: {best_gpu.name} "
-          f"(Free: {best_gpu.memoryFree}MB / {best_gpu.memoryTotal}MB)")
-    return best_gpu.id
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # Data loaders
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last, return_class2idx=False):
+    norm_mean, norm_std = const.get_norm_stats(config["backbone_name"])
     dataset_instance = dataset.Dataset(
-        dataset_name=args.data,
         reals_name=args.reals,
         input_size=config["input_size"],
         is_train=is_train,
         is_val=is_val,
-
         use_augs=args.use_augs,
         affine_prob=args.affine_prob,
-        debug=args.debug
+        debug=args.debug,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
     ).create_dataset()
 
     num_workers = getattr(args, 'num_workers', 4)
@@ -255,13 +241,20 @@ def build_model(config, args):
     if not os.path.exists(gmm_parameters):
         print(f"GMM parameters not found at {gmm_parameters}.")
         print(f"Running generate_parameters.py...")
+        gen_script = os.path.join(const.WORKING_DIR, "scripts", "generate_parameters.py")
+        if not os.path.exists(gen_script):
+            raise FileNotFoundError(
+                f"Cannot generate GMM parameters: script not found at {gen_script}")
         cmd = [
             sys.executable,
-            os.path.join(const.WORKING_DIR, "generate_parameters.py"),
+            gen_script,
             "--model_name", config["backbone_name"],
             "--reals", args.reals,
         ]
         subprocess.run(cmd, check=True)
+        if not os.path.exists(gmm_parameters):
+            raise FileNotFoundError(
+                f"generate_parameters.py ran but expected output is missing: {gmm_parameters}")
         print("GMM parameters generated successfully.")
 
     gmm_values = np.load(gmm_parameters, allow_pickle=True).item()
@@ -747,8 +740,8 @@ def train(args, config, canonical_checkpoint_dir):
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     wandb.init(
-        entity="orazio-mattia",
-        project="MuFlow",
+        entity=args.wandb_entity,
+        project=args.wandb_project,
         config=config,
         name=args.run_name,
         mode="disabled" if args.debug else args.wandb)
@@ -761,16 +754,7 @@ def train(args, config, canonical_checkpoint_dir):
         print('Model loaded!')
 
     # GPU Selection
-    if args.gpu_id is not None:
-        device = torch.device(f'cuda:{args.gpu_id}')
-        print(f"📌 Using manually specified GPU {args.gpu_id}")
-    else:
-        gpu_id = select_best_gpu()
-        if gpu_id is not None:
-            device = torch.device(f'cuda:{gpu_id}')
-        else:
-            device = torch.device('cpu')
-            print("⚠️  No GPU available, using CPU")
+    device = resolve_device(args.gpu_id)
 
     model.to(device)
     print(f"✓ Model moved to {device}")
@@ -896,7 +880,7 @@ if __name__ == "__main__":
     pprint(config)
 
     # ── Canonical run name (no hyperparams) ─────────────────────────────────
-    canonical_run_name = f"{config['backbone_name']}_{args.data}_{args.reals}_{config['pooling_type']}"
+    canonical_run_name = f"{config['backbone_name']}_{args.reals}_{config['pooling_type']}"
     if args.use_lof:
         canonical_run_name += "_lof"
     else:

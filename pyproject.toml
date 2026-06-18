@@ -14,7 +14,7 @@ dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     "timm>=0.9.0",
-    "open-clip-torch>=2.20.0",
+    "clip @ git+https://github.com/openai/CLIP.git",
     "FrEIA @ git+https://github.com/VLL-HD/FrEIA@1779d1fba1e21000fda1927b59eeac0a6fcaa284",
     "numpy>=1.24.0",
     "scipy>=1.10.0",
@@ -28,6 +28,7 @@ dependencies = [
     "pandas>=2.0.0",
     "tqdm>=4.65.0",
     "opencv-python>=4.7.0",
+    "gputil>=1.4.0",
 ]
 
 [tool.hatch.metadata]

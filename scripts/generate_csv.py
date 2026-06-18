@@ -4,8 +4,12 @@ import os
 from collections import defaultdict
 import random
 
+from muflow import constants as const
+
 # Set seed for reproducibility
 random.seed(42)
+
+ROOT = os.path.join(const.DATA_DIR, "datasets")
 
 # List to contain all CSV data
 csv_data = []
@@ -17,7 +21,7 @@ print("=" * 60)
 print("Processing WILD (with classes)")
 print("=" * 60)
 
-path_pattern_ff4all = "/media/orazio_mattia_group/ad4dd/WILD/*/*/*.png"
+path_pattern_ff4all = os.path.join(ROOT, "WILD", "*", "*", "*.png")
 all_files_ff4all = glob.glob(path_pattern_ff4all)
 
 # Organize files by class
@@ -60,7 +64,7 @@ print("=" * 60)
 print("Processing other files (without classes)")
 print("=" * 60)
 
-path_pattern_other = "/media/orazio_mattia_group/ad4dd/*/*/*.png"
+path_pattern_other = os.path.join(ROOT, "*", "*", "*.png")
 all_files_other = glob.glob(path_pattern_other)
 
 # Exclude WILD files already processed
@@ -97,7 +101,7 @@ print("=" * 60)
 print("Processing datasets_DFX")
 print("=" * 60)
 
-path_pattern_dfx = "/media/orazio_mattia_group/ad4dd/datasets_DFX/*/*.png"
+path_pattern_dfx = os.path.join(ROOT, "datasets_DFX", "*", "*.png")
 all_files_dfx = glob.glob(path_pattern_dfx)
 
 # Split into train (70%), val (15%) and test (15%)
@@ -132,7 +136,7 @@ print("Processing CelebA HQ")
 print("=" * 60)
 
 # Train
-celeba_train_pattern = "/media/orazio_mattia_group/ad4dd/celeba_hq/train/*/*.jpg"
+celeba_train_pattern = os.path.join(ROOT, "celeba_hq", "train", "*", "*.jpg")
 celeba_train_files = glob.glob(celeba_train_pattern)
 
 random.shuffle(celeba_train_files)
@@ -147,7 +151,7 @@ for file_path in celeba_train_files[n_train_celeba:]:
 print(f"CelebA HQ Train: {n_train_celeba} images")
 print(f"CelebA HQ Val: {n_val_celeba} images")
 
-celeba_test_pattern = "/media/orazio_mattia_group/ad4dd/celeba_hq/val/*/*.jpg"
+celeba_test_pattern = os.path.join(ROOT, "celeba_hq", "val", "*", "*.jpg")
 celeba_test_files = glob.glob(celeba_test_pattern)
 
 for file_path in celeba_test_files:
@@ -158,7 +162,7 @@ print(f"CelebA HQ Total: {len(celeba_train_files) + len(celeba_test_files)} imag
 # ============================================================================
 # Save the CSV
 # ============================================================================
-output_file = '/media/orazio_mattia_group/ad4dd/dataset_split_rand.csv'
+output_file = os.path.join(ROOT, "dataset_split_rand.csv")
 with open(output_file, 'w', newline='') as f:
     writer = csv.writer(f)
     writer.writerow(["path", "split"])

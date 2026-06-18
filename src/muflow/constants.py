@@ -1,7 +1,19 @@
-CHECKPOINT_DIR = "logs/"
+import os
 
-DATA_DIR = "/media/orazio_mattia_group/ad4dd"
-WORKING_DIR = "/home/opontorno/projects/MuFlow"
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# All paths can be overridden via environment variables so the project is
+# portable across machines without editing the source.
+#
+#   MUFLOW_DATA_DIR     root of the datasets (see README for the expected layout)
+#   MUFLOW_WORKING_DIR  repo root (auto-detected from this file by default)
+#   MUFLOW_CHECKPOINT_DIR  where training runs are written (default: "logs/")
+
+# Repo root = two levels up from this file (src/muflow/constants.py → repo root)
+_DEFAULT_WORKING_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+WORKING_DIR    = os.environ.get("MUFLOW_WORKING_DIR", _DEFAULT_WORKING_DIR)
+DATA_DIR       = os.environ.get("MUFLOW_DATA_DIR", "/media/orazio_mattia_group/ad4dd")
+CHECKPOINT_DIR = os.environ.get("MUFLOW_CHECKPOINT_DIR", "logs/")
 
 # ── Classic backbones ─────────────────────────────────────────────────────────
 BACKBONE_DEIT         = "deit_base_distilled_patch16_384"
@@ -41,16 +53,16 @@ DINO_STD  = [0.229, 0.224, 0.225]
 # Sets
 DINO_BACKBONES = [BACKBONE_DINOV2_VITS14, BACKBONE_DINOV2_VITB14, BACKBONE_DINOV2_VITL14]
 
-# ── CLIP backbones (open_clip) ────────────────────────────────────────────────
+# ── CLIP backbones (official OpenAI CLIP) ─────────────────────────────────────
 BACKBONE_CLIP_VITB32 = "clip_vitb32"
 BACKBONE_CLIP_VITB16 = "clip_vitb16"
 BACKBONE_CLIP_VITL14 = "clip_vitl14"
 
-# (open_clip model_name, pretrained_tag)
-CLIP_OPENCLIP_NAMES = {
-    BACKBONE_CLIP_VITB32: ("ViT-B-32", "laion2b_s34b_b79k"),
-    BACKBONE_CLIP_VITB16: ("ViT-B-16", "laion2b_s34b_b88k"),
-    BACKBONE_CLIP_VITL14: ("ViT-L-14", "laion2b_s32b_b82k"),
+# Official OpenAI CLIP model strings (used with clip.load())
+CLIP_OPENAI_NAMES = {
+    BACKBONE_CLIP_VITB32: "ViT-B/32",
+    BACKBONE_CLIP_VITB16: "ViT-B/16",
+    BACKBONE_CLIP_VITL14: "ViT-L/14",
 }
 CLIP_CHANNELS = {
     BACKBONE_CLIP_VITB32: 768,
@@ -62,11 +74,20 @@ CLIP_PATCH_SIZE = {
     BACKBONE_CLIP_VITB16: 16,
     BACKBONE_CLIP_VITL14: 14,
 }
-# CLIP uses its own normalization (different from ImageNet)
 CLIP_MEAN = [0.48145466, 0.4578275,  0.40821073]
 CLIP_STD  = [0.26862954, 0.26130258, 0.27577711]
 
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD  = [0.229, 0.224, 0.225]
+
 CLIP_BACKBONES = [BACKBONE_CLIP_VITB32, BACKBONE_CLIP_VITB16, BACKBONE_CLIP_VITL14]
+
+
+def get_norm_stats(backbone_name: str):
+    """Return (mean, std) normalization stats appropriate for backbone_name."""
+    if backbone_name in CLIP_BACKBONES:
+        return CLIP_MEAN, CLIP_STD
+    return IMAGENET_MEAN, IMAGENET_STD
 
 # ── All supported backbones ───────────────────────────────────────────────────
 SUPPORTED_BACKBONES = [

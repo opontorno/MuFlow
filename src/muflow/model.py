@@ -12,50 +12,36 @@ import numpy as np
 
 class CLIPVisualExtractor(nn.Module):
     """
-    Wraps an open_clip visual encoder and exposes a list of intermediate
+    Wraps the official OpenAI CLIP ViT visual encoder and exposes intermediate
     spatial feature maps at user-specified transformer block indices.
 
-    The input tensor is expected to be ImageNet-normalised
-    (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]).  The extractor
-    internally undoes that and re-applies CLIP normalisation so that the
-    rest of the pipeline (dataset, transforms) remains unchanged.
+    Inputs must already be normalised with CLIP stats — handled upstream by
+    create_image_transform() when backbone_name is a CLIP variant.
 
     Returns a list of (B, C, Hf, Wf) tensors, one per requested block.
+    Primary target: ViT-L/14 (hidden_dim=1024, patch_size=14, 24 blocks).
     """
 
     def __init__(self, backbone_name: str, out_block_indices: list):
         super().__init__()
         try:
-            import open_clip
+            import clip as openai_clip
         except ImportError:
             raise ImportError(
-                "open_clip_torch is required for CLIP backbones. "
-                "Install with: pip install open-clip-torch"
+                "The official OpenAI CLIP package is required. "
+                "Install with: pip install git+https://github.com/openai/CLIP.git"
             )
-        clip_model_name, pretrained = const.CLIP_OPENCLIP_NAMES[backbone_name]
-        clip_model, _, _ = open_clip.create_model_and_transforms(
-            clip_model_name, pretrained=pretrained
-        )
-        self.visual           = clip_model.visual
-        self.out_block_indices= sorted(out_block_indices)
-        self.patch_size       = const.CLIP_PATCH_SIZE[backbone_name]
-        self.hidden_dim       = const.CLIP_CHANNELS[backbone_name]
+        model_name             = const.CLIP_OPENAI_NAMES[backbone_name]
+        clip_model, _          = openai_clip.load(model_name, device="cpu")
+        self.visual            = clip_model.visual
+        self.out_block_indices = sorted(out_block_indices)
+        self.patch_size        = const.CLIP_PATCH_SIZE[backbone_name]
+        self.hidden_dim        = const.CLIP_CHANNELS[backbone_name]
 
-        # Buffers for renormalisation: ImageNet → CLIP colour stats
-        imagenet_mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-        imagenet_std  = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-        clip_mean     = torch.tensor(const.CLIP_MEAN).view(1, 3, 1, 1)
-        clip_std      = torch.tensor(const.CLIP_STD ).view(1, 3, 1, 1)
-        self.register_buffer('imagenet_mean', imagenet_mean)
-        self.register_buffer('imagenet_std',  imagenet_std)
-        self.register_buffer('clip_mean',     clip_mean)
-        self.register_buffer('clip_std',      clip_std)
+        for param in self.visual.parameters():
+            param.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> list:
-        # Undo ImageNet norm, apply CLIP norm
-        x = x * self.imagenet_std + self.imagenet_mean   # → [0,1]
-        x = (x - self.clip_mean) / self.clip_std
-
         v = self.visual
         B = x.shape[0]
 
@@ -69,13 +55,13 @@ class CLIPVisualExtractor(nn.Module):
         x   = torch.cat([cls, x], dim=1)                     # (B, N+1, C)
         x   = x + v.positional_embedding.to(x.dtype)
         x   = v.ln_pre(x)
-        x   = x.permute(1, 0, 2)                             # (N+1, B, C)
+        x   = x.permute(1, 0, 2)                             # (N+1, B, C) — seq-first
 
         features = []
         for i, block in enumerate(v.transformer.resblocks):
             x = block(x)
             if i in self.out_block_indices:
-                # Strip CLS, reshape to spatial map
+                # Strip CLS token, reshape to spatial map
                 tokens = x[1:].permute(1, 2, 0)              # (B, C, N)
                 feat   = tokens.reshape(B, self.hidden_dim, Hf, Wf)
                 features.append(feat)
@@ -169,7 +155,7 @@ class FastFlow(nn.Module):
             scales   = [ps] * num_out
 
         elif backbone_name in const.CLIP_BACKBONES:
-            # ── CLIP (open_clip) ───────────────────────────────────────────
+            # ── CLIP (official OpenAI CLIP) ────────────────────────────────
             if in_channels != 3:
                 print(f"[WARNING] CLIP only supports in_channels=3; ignoring in_channels={in_channels}")
             self.backbone_type     = 'clip'
@@ -227,8 +213,9 @@ class FastFlow(nn.Module):
                     flow_steps=flow_steps,
                 )
             )
-        self.input_size   = input_size
-        self.pooling_type = pooling_type
+        self.input_size    = input_size
+        self.pooling_type  = pooling_type
+        self._backbone_name = backbone_name
 
         gmm_values = gmm_values["real"]
         self.means = []
@@ -302,10 +289,13 @@ class FastFlow(nn.Module):
             )
 
         # ── Preprocessing (same as dataset pipeline) ──────────────────────
+        norm_mean, norm_std = const.get_norm_stats(self._backbone_name)
         transform = create_image_transform(
             self.input_size,
             is_train=False,
             use_augs=False,
+            norm_mean=norm_mean,
+            norm_std=norm_std,
         )
         tensor = transform(image).unsqueeze(0)   # (1, 3, H, W)
 
@@ -389,11 +379,4 @@ class FastFlow(nn.Module):
             features = [self.norms[i](feature) for i, feature in enumerate(features)]
         
         return self.process_features(features)
-    
-    def unfreeze_fastflow(self):
-        """Unfreeze FastFlow for training"""
-        for nf_flow in self.nf_flows:
-            for param in nf_flow.parameters():
-                param.requires_grad = True
-        print("FastFlow unfrozen")
 

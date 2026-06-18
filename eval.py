@@ -83,15 +83,17 @@ def create_dataloader(args, config, opt):
     attack_type   = getattr(opt, 'attack_type', 'none')
     attack_params = getattr(opt, 'attack_params', {})
 
+    norm_mean, norm_std = const.get_norm_stats(config["backbone_name"])
     test_dataset = dataset.Dataset(
-        dataset_name=args.data,
         reals_name=args.reals,
         input_size=config["input_size"],
         is_train=False,
         is_val=False,
         use_augs=True if getattr(args, 'use_augs', False) else False,
         attack_type=attack_type,
-        attack_params=attack_params
+        attack_params=attack_params,
+        norm_mean=norm_mean,
+        norm_std=norm_std,
     ).create_dataset()
 
     num_workers = getattr(args, 'num_workers', 4)
@@ -139,11 +141,12 @@ def collect_custom_images(path_or_glob):
 
 
 class CustomImageDataset(torch.utils.data.Dataset):
-    def __init__(self, image_paths, labels, input_size):
+    def __init__(self, image_paths, labels, input_size, norm_mean=None, norm_std=None):
         self.image_paths = image_paths
         self.labels      = labels
         self.transform   = dataset.create_image_transform(
-            input_size, is_train=False, use_augs=False
+            input_size, is_train=False, use_augs=False,
+            norm_mean=norm_mean, norm_std=norm_std,
         )
 
     def __len__(self):
@@ -176,7 +179,9 @@ def create_custom_dataloader(args, config):
     if not all_paths:
         raise ValueError("No images found in any of the provided custom dirs.")
 
-    ds = CustomImageDataset(all_paths, all_group_ids, config["input_size"])
+    norm_mean, norm_std = const.get_norm_stats(config["backbone_name"])
+    ds = CustomImageDataset(all_paths, all_group_ids, config["input_size"],
+                            norm_mean=norm_mean, norm_std=norm_std)
     loader = torch.utils.data.DataLoader(
         ds, batch_size=64, shuffle=False,
         num_workers=getattr(args, 'num_workers', 4), drop_last=False,

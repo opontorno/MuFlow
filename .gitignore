@@ -16,3 +16,4 @@ preds_*.py
 tmp*
 scripts/*.ipynb
 **/.pictures/
+.python-version
