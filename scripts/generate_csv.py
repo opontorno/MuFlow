@@ -6,177 +6,121 @@ import random
 
 from muflow import constants as const
 
-# Set seed for reproducibility
 random.seed(42)
 
 ROOT = os.path.join(const.DATA_DIR, "datasets")
+output_file = os.path.join(const.WORKING_DIR, "data", "dataset_split_rand.csv")
 
-# List to contain all CSV data
 csv_data = []
 
-# ============================================================================
-# 1. WILD - split by class with proportion 70-15-15 (train-val-test)
-# ============================================================================
-print("=" * 60)
-print("Processing WILD (with classes)")
-print("=" * 60)
 
-path_pattern_ff4all = os.path.join(ROOT, "WILD", "*", "*", "*.png")
-all_files_ff4all = glob.glob(path_pattern_ff4all)
+N_FAKE_PER_CLASS = 1000
 
-# Organize files by class
-files_by_class = defaultdict(list)
 
-for file_path in all_files_ff4all:
-    parts = file_path.split(os.sep)
-    class_name = parts[-2]
-    files_by_class[class_name].append(file_path)
+def split_by_class(pattern, label="class"):
+    """Glob files matching pattern, group by generator (path[-2]), cap at
+    N_FAKE_PER_CLASS, then split 70-15-15 per class."""
+    files_by_class = defaultdict(list)
+    for f in glob.glob(pattern):
+        files_by_class[f.split(os.sep)[-2]].append(f)
 
-# For each class, split into train (70%), val (15%) and test (15%)
-for class_name, files in files_by_class.items():
+    print(f"{'='*60}\nProcessing {label} ({len(files_by_class)} classes)")
+    rows = []
+    for cls, files in sorted(files_by_class.items()):
+        random.shuffle(files)
+        files = files[:N_FAKE_PER_CLASS]          # cap to 1000
+        n_train = int(len(files) * 0.70)
+        n_val   = int(len(files) * 0.15)
+        splits  = (["train"] * n_train
+                 + ["val"]   * n_val
+                 + ["test"]  * (len(files) - n_train - n_val))
+        rows += [[f, s] for f, s in zip(files, splits)]
+        print(f"  {cls}: {len(files)} used  "
+              f"(train={n_train} / val={n_val} / test={len(files)-n_train-n_val})")
+    return rows
+
+
+def split_random(pattern, label=""):
+    """Glob files matching pattern, random 70-15-15 split (no class grouping)."""
+    files = glob.glob(pattern, recursive=True)
     random.shuffle(files)
-    n_train = int(len(files) * 0.7)
-    n_val = int(len(files) * 0.15)
-    
-    train_files = files[:n_train]
-    val_files = files[n_train:n_train + n_val]
-    test_files = files[n_train + n_val:]
-    
-    for file_path in train_files:
-        csv_data.append([file_path, "train"])
-    
-    for file_path in val_files:
-        csv_data.append([file_path, "val"])
-    
-    for file_path in test_files:
-        csv_data.append([file_path, "test"])
-    
-    print(f"Class: {class_name}")
-    print(f"  Train: {len(train_files)} images ({len(train_files)/len(files)*100:.1f}%)")
-    print(f"  Val: {len(val_files)} images ({len(val_files)/len(files)*100:.1f}%)")
-    print(f"  Test: {len(test_files)} images ({len(test_files)/len(files)*100:.1f}%)")
-    print(f"  Total: {len(files)} images\n")
+    n_train = int(len(files) * 0.70)
+    n_val   = int(len(files) * 0.15)
+    rows = (  [[f, "train"] for f in files[:n_train]]
+            + [[f, "val"]   for f in files[n_train:n_train + n_val]]
+            + [[f, "test"]  for f in files[n_train + n_val:]])
+    print(f"{'='*60}\nProcessing {label}: {len(files)} images  "
+          f"(train={n_train} / val={n_val} / test={len(files)-n_train-n_val})")
+    return rows
 
-# ============================================================================
-# 2. Other files without class - split with proportion 70-15-15 (train-val-test)
-# ============================================================================
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. FFHQ — real training images
+#    Structure: ffhq/<subfolder>/<image>.png
+# ─────────────────────────────────────────────────────────────────────────────
+csv_data += split_random(
+    os.path.join(ROOT, "ffhq", "*", "*.png"),
+    label="FFHQ (reals)",
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. WILD — fake images, Closed_Set + Open_Set
+#    Structure: WILD/{Closed_Set,Open_Set}/<generator>/<image>.png
+#    Post-Processed is intentionally excluded (files are deeper than 3 levels).
+# ─────────────────────────────────────────────────────────────────────────────
+csv_data += split_by_class(
+    os.path.join(ROOT, "WILD", "*", "*", "*.png"),
+    label="WILD (Closed_Set + Open_Set)",
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. datasets_DFX — additional fake generators
+#    Structure: datasets_DFX/<generator>/<image>.png
+# ─────────────────────────────────────────────────────────────────────────────
+csv_data += split_by_class(
+    os.path.join(ROOT, "datasets_DFX", "*", "*.png"),
+    label="datasets_DFX",
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. CelebA-HQ — OOD real images
+#    train folder → 80 % train / 20 % val (used as threshold-calibration reals)
+#    val folder   → test  (used as OOD real at test time, label 99)
+#    Structure: celeba_hq/{train,val}/{female,male}/<image>.jpg
+# ─────────────────────────────────────────────────────────────────────────────
 print("=" * 60)
-print("Processing other files (without classes)")
-print("=" * 60)
+print("Processing CelebA-HQ (OOD reals)")
 
-path_pattern_other = os.path.join(ROOT, "*", "*", "*.png")
-all_files_other = glob.glob(path_pattern_other)
+celeba_train = glob.glob(os.path.join(ROOT, "celeba_hq", "train", "*", "*.jpg"))
+random.shuffle(celeba_train)
+n_train_c = int(len(celeba_train) * 0.80)
+csv_data += [[f, "train"] for f in celeba_train[:n_train_c]]
+csv_data += [[f, "val"]   for f in celeba_train[n_train_c:]]
 
-# Exclude WILD files already processed
-all_files_other = [f for f in all_files_other if "/WILD/" not in f]
+celeba_test = glob.glob(os.path.join(ROOT, "celeba_hq", "val", "*", "*.jpg"))
+csv_data += [[f, "test"] for f in celeba_test]
 
-# Split into train (70%), val (15%) and test (15%)
-random.shuffle(all_files_other)
-n_train_other = int(len(all_files_other) * 0.7)
-n_val_other = int(len(all_files_other) * 0.15)
+print(f"  train folder → train={n_train_c} / val={len(celeba_train)-n_train_c}")
+print(f"  val   folder → test={len(celeba_test)}")
 
-train_files_other = all_files_other[:n_train_other]
-val_files_other = all_files_other[n_train_other:n_train_other + n_val_other]
-test_files_other = all_files_other[n_train_other + n_val_other:]
-
-for file_path in train_files_other:
-    csv_data.append([file_path, "train"])
-
-for file_path in val_files_other:
-    csv_data.append([file_path, "val"])
-
-for file_path in test_files_other:
-    csv_data.append([file_path, "test"])
-
-print(f"Files without class:")
-print(f"  Train: {len(train_files_other)} images ({len(train_files_other)/len(all_files_other)*100:.1f}%)")
-print(f"  Val: {len(val_files_other)} images ({len(val_files_other)/len(all_files_other)*100:.1f}%)")
-print(f"  Test: {len(test_files_other)} images ({len(test_files_other)/len(all_files_other)*100:.1f}%)")
-print(f"  Total: {len(all_files_other)} images\n")
-
-# ============================================================================
-# 3. datasets_DFX - split with proportion 70-15-15 (train-val-test)
-# ============================================================================
-print("=" * 60)
-print("Processing datasets_DFX")
-print("=" * 60)
-
-path_pattern_dfx = os.path.join(ROOT, "datasets_DFX", "*", "*.png")
-all_files_dfx = glob.glob(path_pattern_dfx)
-
-# Split into train (70%), val (15%) and test (15%)
-random.shuffle(all_files_dfx)
-n_train_dfx = int(len(all_files_dfx) * 0.7)
-n_val_dfx = int(len(all_files_dfx) * 0.15)
-
-train_files_dfx = all_files_dfx[:n_train_dfx]
-val_files_dfx = all_files_dfx[n_train_dfx:n_train_dfx + n_val_dfx]
-test_files_dfx = all_files_dfx[n_train_dfx + n_val_dfx:]
-
-for file_path in train_files_dfx:
-    csv_data.append([file_path, "train"])
-
-for file_path in val_files_dfx:
-    csv_data.append([file_path, "val"])
-
-for file_path in test_files_dfx:
-    csv_data.append([file_path, "test"])
-
-print(f"datasets_DFX:")
-print(f"  Train: {len(train_files_dfx)} images ({len(train_files_dfx)/len(all_files_dfx)*100:.1f}%)")
-print(f"  Val: {len(val_files_dfx)} images ({len(val_files_dfx)/len(all_files_dfx)*100:.1f}%)")
-print(f"  Test: {len(test_files_dfx)} images ({len(test_files_dfx)/len(all_files_dfx)*100:.1f}%)")
-print(f"  Total: {len(all_files_dfx)} images\n")
-
-# ============================================================================
-# 4. CelebA HQ - keep original train/val split, val becomes "val"
-# ============================================================================
-print("=" * 60)
-print("Processing CelebA HQ")
-print("=" * 60)
-
-# Train
-celeba_train_pattern = os.path.join(ROOT, "celeba_hq", "train", "*", "*.jpg")
-celeba_train_files = glob.glob(celeba_train_pattern)
-
-random.shuffle(celeba_train_files)
-n_train_celeba = int(len(celeba_train_files) * 0.8)
-n_val_celeba = len(celeba_train_files) - n_train_celeba
-
-for file_path in celeba_train_files[:n_train_celeba]:
-    csv_data.append([file_path, "train"])
-for file_path in celeba_train_files[n_train_celeba:]:
-    csv_data.append([file_path, "val"])
-
-print(f"CelebA HQ Train: {n_train_celeba} images")
-print(f"CelebA HQ Val: {n_val_celeba} images")
-
-celeba_test_pattern = os.path.join(ROOT, "celeba_hq", "val", "*", "*.jpg")
-celeba_test_files = glob.glob(celeba_test_pattern)
-
-for file_path in celeba_test_files:
-    csv_data.append([file_path, "test"])
-
-print(f"CelebA HQ Test: {len(celeba_test_files)} images")
-print(f"CelebA HQ Total: {len(celeba_train_files) + len(celeba_test_files)} images\n")
-# ============================================================================
-# Save the CSV
-# ============================================================================
-output_file = os.path.join(ROOT, "dataset_split_rand.csv")
-with open(output_file, 'w', newline='') as f:
+# ─────────────────────────────────────────────────────────────────────────────
+# Save
+# ─────────────────────────────────────────────────────────────────────────────
+os.makedirs(os.path.dirname(output_file), exist_ok=True)
+with open(output_file, "w", newline="") as f:
     writer = csv.writer(f)
     writer.writerow(["path", "split"])
     writer.writerows(csv_data)
 
+total_train = sum(1 for r in csv_data if r[1] == "train")
+total_val   = sum(1 for r in csv_data if r[1] == "val")
+total_test  = sum(1 for r in csv_data if r[1] == "test")
+
 print("=" * 60)
 print("FINAL SUMMARY")
 print("=" * 60)
-total_train = sum(1 for row in csv_data if row[1] == "train")
-total_val = sum(1 for row in csv_data if row[1] == "val")
-total_test = sum(1 for row in csv_data if row[1] == "test")
-
-print(f"CSV saved in: {output_file}")
-print(f"Total images: {len(csv_data)}")
-print(f"  Train: {total_train} images ({total_train/len(csv_data)*100:.1f}%)")
-print(f"  Val: {total_val} images ({total_val/len(csv_data)*100:.1f}%)")
-print(f"  Test: {total_test} images ({total_test/len(csv_data)*100:.1f}%)")
+print(f"CSV saved in : {output_file}")
+print(f"Total images : {len(csv_data)}")
+print(f"  Train : {total_train} ({total_train/len(csv_data)*100:.1f}%)")
+print(f"  Val   : {total_val}   ({total_val/len(csv_data)*100:.1f}%)")
+print(f"  Test  : {total_test}  ({total_test/len(csv_data)*100:.1f}%)")

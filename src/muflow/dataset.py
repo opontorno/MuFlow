@@ -11,7 +11,7 @@ from muflow import constants as c
 from muflow.attacks import RobustnessAttacks
 
 
-CSV_PATH = os.path.join(c.DATA_DIR, 'datasets', 'dataset_split_rand.csv')
+CSV_PATH = os.path.join(c.WORKING_DIR, 'data', 'dataset_split_rand.csv')
 
 
 def create_image_transform(input_size, is_train=False,
@@ -21,12 +21,12 @@ def create_image_transform(input_size, is_train=False,
     Helper function to create image transform pipeline.
 
     Pipeline:
-        1. RandomAffine (translate + scale, NO rotation, fill=0) to break alignment bias on HIGH-RES image.
-        2. RandomHorizontalFlip (safe augmentation, zero interpolation).
-        3. Resize (downsample ONLY AFTER spatial transforms to minimize interpolation damage).
-        4. ToTensor + Normalize.
+        1. RandomAffine (translate + scale, NO rotation, fill=0) — only if use_augs=True and is_train,
+           unless apply_affine_aug overrides explicitly (used to disable on val set).
+        2. Resize (downsample AFTER spatial transforms to minimise interpolation damage).
+        3. ToTensor + Normalize.
     """
-    _affine = is_train if apply_affine_aug is None else apply_affine_aug
+    _affine = (is_train and use_augs) if apply_affine_aug is None else apply_affine_aug
     mean = norm_mean if norm_mean is not None else [0.485, 0.456, 0.406]
     std  = norm_std  if norm_std  is not None else [0.229, 0.224, 0.225]
 
@@ -45,9 +45,6 @@ def create_image_transform(input_size, is_train=False,
                 p=affine_prob,
             )
         )
-
-    if is_train and use_augs:
-        pipeline.append(transforms.RandomHorizontalFlip(p=0.5))
 
     pipeline.append(transforms.Resize(input_size))
     pipeline.append(transforms.ToTensor())
@@ -179,7 +176,7 @@ class DeepFakeDataset(Dataset):
         self.class_to_idx = {cls: idx + 1 for idx, cls in enumerate(self.classes)}
         ood_reals = 'celeba_hq' if reals_name == 'ffhq' else 'ffhq'
         self.class_to_idx[np.str_(ood_reals)] = 99  # Out-of-distribution real class
-        
+
         self.labels = []
         for image_file in self.image_files:
             if reals_name in image_file:

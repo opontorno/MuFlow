@@ -92,11 +92,10 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, help="path to load checkpoint")
 
     parser.add_argument('--wandb', default='online', choices=['online', 'offline', 'disabled'])
-    parser.add_argument('--wandb_entity', type=str, default='orazio-mattia',
-                        help="W&B entity (team/user). Default: your default W&B entity.")
+    parser.add_argument('--wandb_entity', type=str, default='orazio-mattia', help="W&B entity (team/user). Default: your default W&B entity.")
     parser.add_argument('--wandb_project', type=str, default='MuFlow', help="W&B project name.")
-    parser.add_argument('--use_augs', action='store_true', help="Enable RandomHorizontalFlip during training (safe augmentation, zero interpolation). "
-                             "RandomAffine (translate + scale, no rotation) is always active during training via --affine_prob.")
+
+    parser.add_argument('--use_augs', action='store_true', help="Enable RandomAffine augmentation during training ")
     parser.add_argument('--affine_prob', type=float, default=0.5)
     parser.add_argument('--run_name', type=str)
     parser.add_argument('--eval_interval', type=int, default=1)
