@@ -8,7 +8,7 @@
   <meta property="og:description" content="One-class deepfake detector trained only on real images, leveraging average images and normalizing flows.">
   <title>µFlow</title>
 
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
@@ -31,6 +31,7 @@
     <div class="navbar-end">
       <a class="navbar-item nav-link" href="#abstract">Abstract</a>
       <a class="navbar-item nav-link" href="#method">Method</a>
+      <a class="navbar-item nav-link" href="#results">Results</a>
       <a class="navbar-item nav-link" href="#bibtex">BibTeX</a>
     </div>
   </div>
@@ -40,14 +41,16 @@
 <section class="hero-section">
   <div class="container is-max-desktop has-text-centered">
 
-    <p class="paper-venue">Conference / Workshop &mdash; Year</p>
+    <p class="paper-venue">
+      <i class="fas fa-hourglass-half" style="margin-right:5px; font-size:0.75rem;"></i>
+      Under Review &mdash; ECCV 2026
+    </p>
 
     <h1 class="paper-title">
       µFlow: Leveraging Average Images for Improving<br>
       Generalisation of Deepfake Faces Detectors
     </h1>
 
-    <!-- Authors -->
     <div class="authors">
       <span class="author-block"><a href="https://opontorno.github.io/">Orazio Pontorno</a><sup>1</sup>,</span>
       <span class="author-block"><a href="https://www.mattialitrico.com/">Mattia Litrico</a><sup>1</sup>,</span>
@@ -61,7 +64,6 @@
       <sup>2</sup>&thinsp;University of Nottingham
     </div>
 
-    <!-- Buttons -->
     <div class="hero-buttons">
       <!-- <a class="hero-btn" href="#" target="_blank">
         <i class="ai ai-arxiv"></i> arXiv
@@ -69,9 +71,18 @@
       <a class="hero-btn hero-btn--github" href="https://github.com/opontorno/MuFlow" target="_blank">
         <i class="fab fa-github"></i> Code (coming soon)
       </a>
-      <a class="hero-btn" href="#" target="_blank">
+      <a class="hero-btn hero-btn--paper" href="#" target="_blank">
         <i class="far fa-file-pdf"></i> Paper
       </a>
+      <a class="hero-btn" href="https://iplab.dmi.unict.it/mfs/" target="_blank">
+        <i class="fas fa-globe"></i> mfs@IPLab Group
+      </a>
+    </div>
+
+    <div class="keywords">
+      <span class="kw-tag">One-Class Deepfake Detection</span>
+      <span class="kw-tag">Average Images</span>
+      <span class="kw-tag">Normalizing Flows</span>
     </div>
 
   </div>
@@ -82,15 +93,31 @@
   <div class="container is-max-desktop">
     <h2 class="section-title">Abstract</h2>
     <div class="section-rule"></div>
-    <p class="abstract-text">
-      Current generative models, including GANs and diffusion models, have reached an outstanding level of photorealism, posing significant risks to privacy and security. To ensure real-world applicability, deepfake detectors must generalise effectively to unseen generators. However, most existing approaches rely on supervised training with both real and fake images, which limits their generalisation especially across generator categories (e.g. GANs vs DMs).
-    </p>
-    <p class="abstract-text" style="margin-top: 1rem;">
-      In this work, we introduce <strong><em>µFlow</em></strong>, a one-class deepfake detector trained only on real images without relying on pseudo-deepfakes or synthetic artifacts. Our approach builds on the observation that averaging multiple images amplifies consistent generative traces, producing highly discriminative feature representations. We leverage this property by modelling the distribution of features extracted from averaged images and training a normalizing flow to align the feature space of individual images with this distribution. This alignment yields a likelihood-based criterion that separates real and fake samples while promoting strong generalisation.
-    </p>
-    <p class="abstract-text" style="margin-top: 1rem;">
-      We evaluate <strong><em>µFlow</em></strong> on a fully out-of-distribution setting, where both real and fake datasets are unseen during training. Experimental results show that our method significantly outperforms state-of-the-art detectors.
-    </p>
+
+    <div class="abstract-layout">
+
+      <div class="abstract-visual">
+        <img src="static/images/visual_abs.png" alt="Visual Abstract of µFlow">
+      </div>
+
+      <div class="abstract-content">
+        <p class="abstract-text">
+          In this work, we introduce <strong><em>µFlow</em></strong>, a one-class deepfake detector
+          trained only on real images without relying on pseudo-deepfakes or synthetic artifacts. Our
+          approach builds on the observation that averaging multiple images amplifies consistent
+          generative traces, producing highly discriminative feature representations. We leverage this
+          property by modelling the distribution of features extracted from averaged images and training
+          a normalizing flow to align the feature space of individual images with this distribution.
+          This alignment yields a likelihood-based criterion that separates real and fake samples while
+          promoting strong generalisation.
+        </p>
+        <p class="abstract-text" style="margin-top: 1rem;">
+          We evaluate <strong><em>µFlow</em></strong> on a fully out-of-distribution setting, where
+          both real and fake datasets are unseen during training. Experimental results show that our
+          method significantly outperforms state-of-the-art detectors.
+        </p>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -100,7 +127,6 @@
     <h2 class="section-title">Method</h2>
     <div class="section-rule"></div>
 
-    <!-- Pipeline figure -->
     <figure class="paper-figure">
       <img src="static/images/pipeline.png" alt="µFlow pipeline overview">
       <figcaption>
@@ -110,13 +136,11 @@
         <em>(b) FastFlow Training:</em> We train FastFlow to project representations extracted
         from real images into the learned discriminative space.
         <em>(c) Inference:</em> At test time, the representation of a real image is mapped to a
-        high-likelihood region of the latent space, while fake images are mapped to low-likelihood
-        regions.
+        high-likelihood region of the latent space, while fake images are mapped to low-likelihood regions.
       </figcaption>
     </figure>
 
-    <!-- t-SNE / features figure -->
-    <figure class="paper-figure" style="margin-top: 3rem;">
+    <figure class="paper-figure" style="margin-top: 2.5rem;">
       <img src="static/images/features.png" alt="t-SNE feature analysis">
       <figcaption>
         <strong>Figure 2 — t-SNE analysis.</strong>
@@ -130,8 +154,92 @@
   </div>
 </section>
 
+<!-- ═══════════════ RESULTS ═══════════════ -->
+<section class="page-section" id="results">
+  <div class="container is-max-desktop">
+    <h2 class="section-title">Results</h2>
+    <div class="section-rule"></div>
+
+    <p class="results-intro">
+      Evaluated in a fully <strong>out-of-distribution</strong> setting across <strong>19 unseen generators</strong> (GANs + open/closed-source DMs)
+      from the 
+      <strong>
+        <a href="https://doi.org/10.1109/IJCNN64981.2025.11227289" target="_blank" rel="noopener noreferrer">WILD</a>
+      </strong> dataset.
+    </p>
+
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <p class="metric-value">94.7<span class="metric-unit">%</span></p>
+        <p class="metric-label">Accuracy</p>
+        <p class="metric-sub">Avg ood Accuracy across generators</p>
+      </div>
+      <div class="metric-card">
+        <p class="metric-value">94.7<span class="metric-unit">%</span></p>
+        <p class="metric-label">AUC</p>
+        <p class="metric-sub">Avg ood AUC across generators</p>
+      </div>
+      <div class="metric-card">
+        <p class="metric-value">95.3<span class="metric-unit">%</span></p>
+        <p class="metric-label">AP</p>
+        <p class="metric-sub">Avg ood AP across generators</p>
+      </div>
+    </div>
+
+    <p class="results-note">
+      <i class="fas fa-info-circle" style="color: var(--blue); margin-right: 5px;"></i>
+      Trained <em>only</em> on real images — no fake images, no pseudo-deepfakes, no synthetic artifacts.
+      Full comparison tables in the <a href="#">paper</a>.
+    </p>
+
+    <!-- Robustness table -->
+    <div class="robustness-section">
+      <h3 class="subsection-title">Robustness to Image Transformations</h3>
+      <p class="subsection-intro">
+        Performance of µFlow under content-preserving degradations
+        — evaluated in the same fully out-of-distribution setting.
+      </p>
+      <div class="robustness-table-wrapper">
+        <table class="robustness-table">
+          <thead>
+            <tr>
+              <th>Transformation</th>
+              <th>ACC (%)</th>
+              <th>AUC (%)</th>
+              <th>AP (%)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Resize</td>
+              <td>90.6</td><td>91.5</td><td>88.4</td>
+            </tr>
+            <tr>
+              <td>Horizontal Flip</td>
+              <td>92.6</td><td>92.7</td><td>91.9</td>
+            </tr>
+            <tr>
+              <td>Gaussian Noise</td>
+              <td>89.7</td><td>89.9</td><td>91.7</td>
+            </tr>
+            <tr>
+              <td>Salt &amp; Pepper</td>
+              <td>90.8</td><td>91.7</td><td>89.6</td>
+            </tr>
+            <tr class="avg-row">
+              <td>Average</td>
+              <td>90.9</td><td>91.5</td><td>90.4</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</section>
+
 <!-- ═══════════════ BIBTEX ═══════════════ -->
-<section class="page-section" id="bibtex">
+<section class="page-section section-tinted" id="bibtex">
   <div class="container is-max-desktop">
     <h2 class="section-title">BibTeX</h2>
     <div class="section-rule"></div>
@@ -140,15 +248,26 @@
       <button class="copy-btn" onclick="copyBibtex()" id="copy-btn">
         <i class="far fa-copy"></i>&nbsp;Copy
       </button>
-<pre class="bibtex-box" id="bibtex-content">@inproceedings{pontorno2025muflow,
+<pre class="bibtex-box" id="bibtex-content">@inproceedings{pontorno2026muflow,
   title     = {{\textmu}Flow: Leveraging Average Images for
                Improving Generalisation of Deepfake Faces Detectors},
   author    = {Pontorno, Orazio and Litrico, Mattia and
                Guarnera, Luca and Giuffrida, Valerio and
                Battiato, Sebastiano},
-  booktitle = {Proceedings of ... (Conference Name)},
-  year      = {2025},
+  booktitle = {Under Review at ECCV 2026},
+  year      = {2026},
 }</pre>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════ AFFILIATIONS LOGOS ═══════════════ -->
+<section class="logos-section">
+  <div class="container is-max-desktop">
+    <div class="logos-row">
+      <img src="static/images/unict_newlogo.png" alt="University of Catania">
+      <img src="static/images/NottinghamBlue.png" alt="University of Nottingham">
+      <img src="static/images/iplab_logo.png" alt="IPLab">
     </div>
   </div>
 </section>
@@ -156,7 +275,7 @@
 <!-- ═══════════════ FOOTER ═══════════════ -->
 <footer class="page-footer">
   <div class="container has-text-centered">
-    <p>&copy; 2025 &middot; University of Catania &middot; University of Nottingham</p>
+    <p>&copy; 2026 &middot; University of Catania &middot; University of Nottingham</p>
     <p class="footer-sub">
       Template adapted from <a href="https://nerfies.github.io" target="_blank">Nerfies</a>.
       Licensed under <a href="http://creativecommons.org/licenses/by-sa/4.0/" target="_blank">CC BY-SA 4.0</a>.
