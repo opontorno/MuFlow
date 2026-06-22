@@ -8,7 +8,7 @@ backbone_name: clip_vitl14
 flow_step: 8
 hidden_ratio: 1.0
 conv3x3_only: True
-pooling_type: mean
+pooling_type: flatten
 gmm_n_components: 1
 out_indices: [21, 22, 23]
 preprocessing: none

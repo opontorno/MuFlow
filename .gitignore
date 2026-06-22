@@ -3,7 +3,7 @@
 **/logs/
 *.pkl
 baselines/
-**/tmp.py
+**/tmp*.py
 parameters/*.npy
 scratch/
 *.bak
