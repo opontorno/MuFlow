@@ -15,6 +15,14 @@ WORKING_DIR    = os.environ.get("MUFLOW_WORKING_DIR", _DEFAULT_WORKING_DIR)
 DATA_DIR       = os.environ.get("MUFLOW_DATA_DIR", "/media/orazio_mattia_group/ad4dd")
 CHECKPOINT_DIR = os.environ.get("MUFLOW_CHECKPOINT_DIR", "logs/")
 
+# ── Patch-based representation ────────────────────────────────────────────────
+# An image is represented through native patches of side = config["input_size"]
+# (NO resize). The flow is trained on single real patches; at inference / GMM
+# fitting an image is summarised by aggregating its patches.
+PATCH_NUM_TRAIN = 4    # random patches sampled per training image (per step)
+PATCH_NUM_REPR  = 16   # patches per image for inference & mean-image GMM centroid
+PATCH_SEED      = 42   # fixed seed → reproducible representation patches
+
 # ── Classic backbones ─────────────────────────────────────────────────────────
 BACKBONE_DEIT         = "deit_base_distilled_patch16_384"
 BACKBONE_CAIT         = "cait_m48_448"

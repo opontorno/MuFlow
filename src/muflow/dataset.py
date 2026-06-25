@@ -1,5 +1,6 @@
 import os
 from glob import glob
+import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
@@ -9,70 +10,33 @@ import pandas as pd
 
 from muflow import constants as c
 from muflow.attacks import RobustnessAttacks
+from muflow.patches import random_patches, repr_patches
 
 
 CSV_PATH = os.path.join(c.WORKING_DIR, 'data', 'dataset_split_rand.csv')
 
 
-def create_image_transform(input_size, is_train=False,
-                           use_augs=True, apply_affine_aug=None, affine_prob=0.5,
-                           norm_mean=None, norm_std=None):
+def make_patch_transform(norm_mean=None, norm_std=None):
+    """Patch → tensor pipeline: ToTensor + backbone-specific Normalize.
+
+    No resize, no augmentation — patches are already native P×P crops.
     """
-    Helper function to create image transform pipeline.
-
-    Pipeline:
-        1. RandomAffine (translate + scale, NO rotation, fill=0) — only if use_augs=True and is_train,
-           unless apply_affine_aug overrides explicitly (used to disable on val set).
-        2. Resize (downsample AFTER spatial transforms to minimise interpolation damage).
-        3. ToTensor + Normalize.
-    """
-    _affine = (is_train and use_augs) if apply_affine_aug is None else apply_affine_aug
-    mean = norm_mean if norm_mean is not None else [0.485, 0.456, 0.406]
-    std  = norm_std  if norm_std  is not None else [0.229, 0.224, 0.225]
-
-    pipeline = []
-
-    if _affine:
-        pipeline.append(
-            transforms.RandomApply(
-                [transforms.RandomAffine(
-                    degrees=0,
-                    translate=(0.20, 0.20),
-                    scale=(0.8, 1.0),
-                    fill=0,
-                    interpolation=transforms.InterpolationMode.BILINEAR
-                )],
-                p=affine_prob,
-            )
-        )
-
-    pipeline.append(transforms.Resize(input_size))
-    pipeline.append(transforms.ToTensor())
-    pipeline.append(transforms.Normalize(mean, std))
-
-    return transforms.Compose(pipeline)
+    mean = norm_mean if norm_mean is not None else c.IMAGENET_MEAN
+    std  = norm_std  if norm_std  is not None else c.IMAGENET_STD
+    return transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std),
+    ])
 
 
 def filter_files_by_csv_split(image_files, is_train, is_val=False):
-    """
-    Helper function to filter image files based on CSV split.
-    
-    Args:
-        image_files: Array of image file paths
-        is_train: Whether this is training data
-        is_val: Whether this is validation data (only used if is_train=True)
-    
-    Returns:
-        Filtered array of image file paths
-    """
+    """Filter image files based on the train/val/test CSV split."""
     guidance = pd.read_csv(CSV_PATH)
-    
     if is_train:
         split_name = 'val' if is_val else 'train'
         guidance = guidance[guidance['split'] == split_name]
     else:
         guidance = guidance[guidance['split'] == 'test']
-    
     allowed = guidance['path'].to_list()
     mask = np.isin(image_files, allowed)
     return image_files[mask]
@@ -81,13 +45,13 @@ def filter_files_by_csv_split(image_files, is_train, is_val=False):
 class Dataset:
     def __init__(self,
     reals_name,
-    input_size=(224, 224),
+    input_size=256,
     is_train=True,
     is_val=False,
     attack_type='none',
     attack_params=None,
-    use_augs=True,
-    affine_prob=0.5,
+    num_train_patches=c.PATCH_NUM_TRAIN,
+    num_repr_patches=c.PATCH_NUM_REPR,
     debug=False,
     norm_mean=None,
     norm_std=None,
@@ -98,8 +62,8 @@ class Dataset:
         self.input_size = input_size
         self.attack_type = attack_type
         self.attack_params = attack_params if attack_params is not None else {}
-        self.use_augs = use_augs
-        self.affine_prob = affine_prob
+        self.num_train_patches = num_train_patches
+        self.num_repr_patches = num_repr_patches
         self.debug = debug
         self.norm_mean = norm_mean
         self.norm_std = norm_std
@@ -130,43 +94,41 @@ class Dataset:
             reals_name=self.reals_name,
             attack_type=self.attack_type,
             attack_params=self.attack_params,
-            use_augs=self.use_augs,
+            num_train_patches=self.num_train_patches,
+            num_repr_patches=self.num_repr_patches,
             debug=self.debug,
-            affine_prob=self.affine_prob,
             norm_mean=self.norm_mean,
             norm_std=self.norm_std,
         )
 
 
 class DeepFakeDataset(Dataset):
-    def __init__(self, root_dir, file_pattern, input_size=(224, 224), is_train=True, is_val=False, reals_name='ffhq',
-                 attack_type='none', attack_params=None, seed=124, use_augs=True,
-                 debug=False, affine_prob=0.5, norm_mean=None, norm_std=None):
+    def __init__(self, root_dir, file_pattern, input_size=256, is_train=True, is_val=False, reals_name='ffhq',
+                 attack_type='none', attack_params=None, seed=124,
+                 num_train_patches=c.PATCH_NUM_TRAIN, num_repr_patches=c.PATCH_NUM_REPR,
+                 debug=False, norm_mean=None, norm_std=None):
         self.debug = debug
         self.is_train = is_train
         self.is_val = is_val
 
+        # Patch side = backbone input size (int). No resize is ever applied.
+        self.P = input_size if isinstance(input_size, int) else input_size[0]
+        self.num_train_patches = num_train_patches
+        self.num_repr_patches = num_repr_patches
+        self.seed_repr = c.PATCH_SEED
+
         random.seed(seed)
         np.random.seed(seed)
 
+        # Content-preserving degradations: applied to the WHOLE image at test time
+        # (before patch extraction), for the robustness evaluation. Never in training.
         self.attack = RobustnessAttacks(
-            attack_type=attack_type if not is_train else 'none',  # Attacchi solo in test
+            attack_type=attack_type if not is_train else 'none',
             **(attack_params if attack_params is not None else {})
         )
-        
-        # Val set (is_train=True, is_val=True) is used for threshold computation:
-        # disable RandomAffineAug so the loss distribution matches the test set
-        # (no augmentation at test time). With flatten pooling the spatial
-        # perturbation inflates val std enormously, making the threshold too wide.
-        self.image_transform = create_image_transform(
-            input_size, is_train, use_augs,
-            apply_affine_aug=False if is_val else None,
-            affine_prob=affine_prob,
-            norm_mean=norm_mean,
-            norm_std=norm_std,
-        )
 
-        file_pattern = file_pattern 
+        self.transform = make_patch_transform(norm_mean, norm_std)
+
         self.image_files = [np.unique(np.array(glob(os.path.join(r, file_pattern), recursive=True))) for r in root_dir]
         self.image_files = np.concatenate(self.image_files)
 
@@ -187,20 +149,20 @@ class DeepFakeDataset(Dataset):
                 class_name = image_file.split("/")[-2]
                 self.labels.append(self.class_to_idx[class_name])
 
-        if not self.is_train:      
+        if not self.is_train:
             min_count = min(sum(1 for label in self.labels if (label != 0 and label != 99)), self.labels.count(0))
             balanced_items = []
             for label in sorted(set(self.labels)):  # Sort labels for consistency
                 label_items = [(img, lbl) for img, lbl in zip(self.image_files, self.labels) if lbl == label]
                 k = min_count if label == 0 else min_count // len(self.classes)
-                
+
                 random.seed(seed + label)  # Different seed per label
                 balanced_items.extend(random.choices(label_items, k=k))
-            
+
             self.image_files, self.labels = zip(*balanced_items)
             self.image_files = np.array(self.image_files)
             self.labels = np.array(self.labels)
-        
+
         rng = np.random.RandomState(seed)
         idx = rng.permutation(len(self.image_files))
 
@@ -209,28 +171,33 @@ class DeepFakeDataset(Dataset):
 
         if self.debug and self.is_train:
             if not self.is_val:
-                print("-"*40)
+                print("-" * 40)
                 print("-- DEBUG MODE: Using only 100 samples for training ---")
-                print("-"*40)
+                print("-" * 40)
             self.image_files = self.image_files[:100]
             self.labels = self.labels[:100]
-        
+
+    def _patches(self, image):
+        """Return a (k, 3, P, P) tensor of normalised patches for one image."""
+        if self.is_train and not self.is_val:
+            plist = random_patches(image, self.P, self.num_train_patches)        # random, per epoch
+        else:
+            plist = repr_patches(image, self.P, self.num_repr_patches, self.seed_repr)  # deterministic
+        return torch.stack([self.transform(p).float() for p in plist])
+
     def __getitem__(self, index):
         image_file = self.image_files[index]
         label = self.labels[index]
 
         image = Image.open(image_file).convert("RGB")
-
-        if not self.is_train:
+        if not self.is_train:                 # robustness degradation on the whole image
             image = self.attack.apply(image)
 
-        image = self.image_transform(image).float()
-        
-        if self.is_train:
-            return image
-        else:
-            return image, label
+        patches = self._patches(image)        # (k, 3, P, P)
+
+        if self.is_train:                     # train & val: patches only (no label)
+            return patches
+        return patches, label                 # test: patches + label
 
     def __len__(self):
         return len(self.image_files)
-

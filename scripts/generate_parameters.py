@@ -8,6 +8,7 @@ import yaml
 import argparse
 from sklearn.mixture import GaussianMixture
 from muflow import constants as const
+from muflow.patches import repr_patches
 from tqdm import tqdm
 
 PREFIX = ""
@@ -144,10 +145,40 @@ def get_features(img, apply_normalization=False):
             return model(img_t)
 
 
-def get_features_from_path(path):
-    """Load image from path and extract features."""
-    img = np.array(Image.open(path).convert("RGB").resize([config['input_size'], config['input_size']], Image.BILINEAR))
-    return get_features(img, apply_normalization=True)
+def _pool(feats, pooling_type):
+    """Spatial pooling of a (B, C, H, W) feature map → 1-D vector (matches model.py)."""
+    if pooling_type == 'mean':
+        return feats.mean([2, 3]).flatten().cpu().numpy()
+    elif pooling_type == 'max':
+        return feats.flatten(2).max(-1)[0].cpu().numpy().squeeze(0)
+    elif pooling_type == 'mean_std':
+        m = feats.mean([2, 3]).flatten().cpu().numpy()
+        s = feats.std([2, 3]).flatten().cpu().numpy()
+        return np.concatenate([m, s])
+    elif pooling_type == 'flatten':
+        return feats.mean(-1).flatten(1).cpu().numpy().squeeze(0)
+    else:  # full_flatten
+        return feats.flatten(1).cpu().numpy().squeeze(0)
+
+
+def mean_image_centroid(path):
+    """Patch-centroid representation of one MEAN image (per layer).
+
+    Crops PATCH_NUM_REPR native patches (fixed seed, no resize), extracts and
+    pools features per patch, then averages over patches → the image centroid.
+    The GMM target is the distribution of these centroids.
+    """
+    img = Image.open(path).convert("RGB")
+    plist = repr_patches(img, config['input_size'], const.PATCH_NUM_REPR, const.PATCH_SEED)
+    per_layer = None
+    for patch in plist:
+        feats = get_features(np.array(patch), apply_normalization=True)
+        pooled = [_pool(f, pooling_type) for f in feats]
+        if per_layer is None:
+            per_layer = [[] for _ in pooled]
+        for li, p in enumerate(pooled):
+            per_layer[li].append(p)
+    return [np.mean(np.stack(layer), axis=0) for layer in per_layer]
 
 
 MEAN_SIZE = os.path.basename(MEANS_DIR.rstrip("/"))  # e.g. "500"
@@ -191,29 +222,11 @@ if len(real_sample) == 0:
 print(f"Number of real samples: {len(real_sample)}")
 print("Extracting features...")
 
+print(f"Patch-centroid representation: {const.PATCH_NUM_REPR} patches of "
+      f"{config['input_size']}px per mean image (seed {const.PATCH_SEED}).")
 real_features = []
-for i, img_path in tqdm(enumerate(real_sample), total=len(real_sample)):
-    features = get_features_from_path(img_path)
-    feats_ = []
-    for feats in features:
-        if pooling_type == 'mean':
-            # Spatial pooling: (B, C, H, W) -> (B, C)
-            feats_.append(feats.mean([2, 3]).flatten().cpu().numpy())
-        elif pooling_type == 'max':
-            # Max pooling: (B, C, H, W) -> (B, C)
-            feats_.append(feats.flatten(2).max(-1)[0].cpu().numpy().squeeze(0))
-        elif pooling_type == 'mean_std':
-            # Mean + Std concatenation: (B, C, H, W) -> (B, 2*C)
-            mean_feats = feats.mean([2, 3]).flatten().cpu().numpy()
-            std_feats = feats.std([2, 3]).flatten().cpu().numpy()
-            feats_.append(np.concatenate([mean_feats, std_feats]))
-        elif pooling_type == 'flatten':
-            # Mean on channels, then flatten spatial: (B, C, H, W) -> (B, C, H) -> (B, C*H)
-            feats_.append(feats.mean(-1).flatten(1).cpu().numpy().squeeze(0))
-        else:  # full_flatten
-            # Full flatten: (B, C, H, W) -> (B, C*H*W)
-            feats_.append(feats.flatten(1).cpu().numpy().squeeze(0))
-    real_features.append(feats_)
+for img_path in tqdm(real_sample, total=len(real_sample)):
+    real_features.append(mean_image_centroid(img_path))
 
 print("Feature extraction complete!")
     

@@ -16,7 +16,7 @@ class CLIPVisualExtractor(nn.Module):
     spatial feature maps at user-specified transformer block indices.
 
     Inputs must already be normalised with CLIP stats — handled upstream by
-    create_image_transform() when backbone_name is a CLIP variant.
+    make_patch_transform() when backbone_name is a CLIP variant.
 
     Returns a list of (B, C, Hf, Wf) tensors, one per requested block.
     Primary target: ViT-L/14 (hidden_dim=1024, patch_size=14, 24 blocks).
@@ -279,7 +279,8 @@ class FastFlow(nn.Module):
                 'mahalanobis'  (float) — mean Mahalanobis distance across layers
         """
         from PIL import Image as _PIL
-        from muflow.dataset import create_image_transform
+        from muflow.dataset import make_patch_transform
+        from muflow.patches import repr_patches
 
         if isinstance(image, np.ndarray):
             image = _PIL.fromarray(image.astype(np.uint8))
@@ -288,27 +289,22 @@ class FastFlow(nn.Module):
                 f"image must be PIL.Image or np.ndarray, got {type(image).__name__}"
             )
 
-        # ── Preprocessing (same as dataset pipeline) ──────────────────────
+        # ── Patch-centroid representation (same as dataset/eval pipeline) ──
         norm_mean, norm_std = const.get_norm_stats(self._backbone_name)
-        transform = create_image_transform(
-            self.input_size,
-            is_train=False,
-            use_augs=False,
-            norm_mean=norm_mean,
-            norm_std=norm_std,
-        )
-        tensor = transform(image).unsqueeze(0)   # (1, 3, H, W)
+        transform = make_patch_transform(norm_mean, norm_std)
+        plist = repr_patches(image, self.input_size, const.PATCH_NUM_REPR, const.PATCH_SEED)
+        patches = torch.stack([transform(p).float() for p in plist])   # (N, 3, P, P)
 
-        # ── Forward pass ──────────────────────────────────────────────────
+        # ── Forward pass (per patch) + aggregate (mean NLL over patches) ──
         device = next(self.nf_flows[0].parameters()).device
-        tensor = tensor.to(device)
+        patches = patches.to(device)
         self.eval()
         with torch.no_grad():
-            ret = self.forward(tensor)
+            ret = self.forward(patches)
 
         return {
-            'loss':        float(ret['loss'].item()),
-            'mahalanobis': float(ret['mahalanobis'].item()),
+            'loss':        float(ret['loss'].mean().item()),
+            'mahalanobis': float(ret['mahalanobis'].mean().item()),
         }
 
     def forward(self, x):

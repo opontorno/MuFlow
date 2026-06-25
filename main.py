@@ -95,8 +95,10 @@ def parse_args():
     parser.add_argument('--wandb_entity', type=str, default='orazio-mattia', help="W&B entity (team/user). Default: your default W&B entity.")
     parser.add_argument('--wandb_project', type=str, default='MuFlow', help="W&B project name.")
 
-    parser.add_argument('--use_augs', action='store_true', help="Enable RandomAffine augmentation during training ")
-    parser.add_argument('--affine_prob', type=float, default=0.5)
+    parser.add_argument('--num_train_patches', type=int, default=const.PATCH_NUM_TRAIN,
+                        help="random native patches sampled per training image (per step)")
+    parser.add_argument('--num_repr_patches', type=int, default=const.PATCH_NUM_REPR,
+                        help="patches per image to build the inference/threshold representation")
     parser.add_argument('--run_name', type=str)
     parser.add_argument('--eval_interval', type=int, default=1)
     parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
@@ -189,8 +191,8 @@ def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last
         input_size=config["input_size"],
         is_train=is_train,
         is_val=is_val,
-        use_augs=args.use_augs,
-        affine_prob=args.affine_prob,
+        num_train_patches=args.num_train_patches,
+        num_repr_patches=args.num_repr_patches,
         debug=args.debug,
         norm_mean=norm_mean,
         norm_std=norm_std,
@@ -290,6 +292,22 @@ def build_optimizer(args, model, config):
 # Training
 # ═══════════════════════════════════════════════════════════════════════════
 
+def score_per_image(model, patches):
+    """Aggregate per-patch scores into one score per image.
+
+    patches : (B, N, 3, P, P)  — N patches per image
+    returns : dict of (B,) tensors, the MEAN of the per-patch NLL / Mahalanobis
+              over the N patches (the inference representation).
+    """
+    B, N = patches.shape[0], patches.shape[1]
+    flat = patches.reshape(B * N, *patches.shape[2:])
+    ret = model(flat)
+    return {
+        "loss":        ret["loss"].reshape(B, N).mean(dim=1),
+        "mahalanobis": ret["mahalanobis"].reshape(B, N).mean(dim=1),
+    }
+
+
 def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
     start_time = time.time()
     model.train()
@@ -299,7 +317,10 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
     device = args.device if hasattr(args, 'device') else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     for step, data in enumerate(dataloader):
+        # data: (B, K, 3, P, P) — K random patches per image, each an independent
+        # training sample. Flatten to (B*K, 3, P, P): the flow learns per single patch.
         data = data.to(device)
+        data = data.reshape(-1, *data.shape[2:])
         ret = model(data)
         loss = ret["loss"].mean()
 
@@ -344,9 +365,9 @@ def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto'
             data, _ = batch
         else:
             data = batch
-        data = data.to(device)
+        data = data.to(device)            # (B, N, 3, P, P)
         with torch.no_grad():
-            ret = model(data)
+            ret = score_per_image(model, data)
             loss_values.append(ret["loss"].cpu())
 
     if len(loss_values) == 0:
@@ -432,9 +453,9 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
     device = model.nf_flows[0].parameters().__next__().device
 
     for data, targets in dataloader:
-        data, targets = data.to(device), targets.to(device)
+        data, targets = data.to(device), targets.to(device)   # data: (B, N, 3, P, P)
         with torch.no_grad():
-            ret = model(data)
+            ret = score_per_image(model, data)
         preds_list.append(ret["loss"].cpu())
         labels_list.append(targets.cpu())
 
@@ -879,18 +900,16 @@ if __name__ == "__main__":
     pprint(config)
 
     # ── Canonical run name (no hyperparams) ─────────────────────────────────
-    canonical_run_name = f"{config['backbone_name']}_{args.reals}_{config['pooling_type']}"
+    canonical_run_name = f"{config['backbone_name']}_{args.reals}_{config['pooling_type']}_patch"
     if args.use_lof:
         canonical_run_name += "_lof"
     else:
         canonical_run_name += f"_t-alpha{args.alpha}"
-    if args.use_augs:
-        canonical_run_name += "_augs"
 
     # ── Temporary run name = canonical + hyperparams ─────────────────────────
     if args.run_name is None:
         args.run_name = (canonical_run_name +
-                         f"affine{args.affine_prob}_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}"
+                         f"_np{args.num_train_patches}_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}"
                          f"_ld{args.lr_decay}_lp{args.lr_patience}")
 
     canonical_checkpoint_dir = os.path.join(const.CHECKPOINT_DIR, canonical_run_name)

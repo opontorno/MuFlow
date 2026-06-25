@@ -18,10 +18,13 @@ from PIL import Image
 
 from muflow import constants as const
 from muflow import dataset
+from muflow.dataset import make_patch_transform
+from muflow.patches import repr_patches
 
 # ── Shared evaluation logic ──────────────────────────────────────────────────
 from main import (
     eval_once,
+    score_per_image,
     _compute_class_metrics,
     _aggregate_by_family,
     _print_family_summary,
@@ -89,7 +92,7 @@ def create_dataloader(args, config, opt):
         input_size=config["input_size"],
         is_train=False,
         is_val=False,
-        use_augs=True if getattr(args, 'use_augs', False) else False,
+        num_repr_patches=getattr(args, 'num_repr_patches', const.PATCH_NUM_REPR),
         attack_type=attack_type,
         attack_params=attack_params,
         norm_mean=norm_mean,
@@ -141,20 +144,22 @@ def collect_custom_images(path_or_glob):
 
 
 class CustomImageDataset(torch.utils.data.Dataset):
-    def __init__(self, image_paths, labels, input_size, norm_mean=None, norm_std=None):
+    def __init__(self, image_paths, labels, input_size, norm_mean=None, norm_std=None,
+                 num_repr_patches=const.PATCH_NUM_REPR):
         self.image_paths = image_paths
         self.labels      = labels
-        self.transform   = dataset.create_image_transform(
-            input_size, is_train=False, use_augs=False,
-            norm_mean=norm_mean, norm_std=norm_std,
-        )
+        self.P           = input_size if isinstance(input_size, int) else input_size[0]
+        self.num_repr_patches = num_repr_patches
+        self.transform   = make_patch_transform(norm_mean, norm_std)
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
         img = Image.open(self.image_paths[idx]).convert('RGB')
-        return self.transform(img), self.labels[idx]
+        plist = repr_patches(img, self.P, self.num_repr_patches, const.PATCH_SEED)
+        patches = torch.stack([self.transform(p).float() for p in plist])  # (N, 3, P, P)
+        return patches, self.labels[idx]
 
 
 def create_custom_dataloader(args, config):
@@ -195,9 +200,9 @@ def eval_custom(dataloader, model, groups, threshold_info):
     device = next(model.nf_flows[0].parameters()).device
 
     for data, gids in tqdm(dataloader, desc="Evaluating custom dirs"):
-        data = data.to(device)
+        data = data.to(device)                 # (B, N, 3, P, P)
         with torch.no_grad():
-            ret = model(data)
+            ret = score_per_image(model, data)
         preds_list.append(ret["loss"].cpu())
         group_ids_list.append(gids)
 
