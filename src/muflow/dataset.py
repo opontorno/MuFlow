@@ -2,7 +2,6 @@ import os
 from glob import glob
 import torch
 from torch.utils.data import Dataset
-from torchvision import transforms
 from PIL import Image
 import random
 import numpy as np
@@ -10,23 +9,10 @@ import pandas as pd
 
 from muflow import constants as c
 from muflow.attacks import RobustnessAttacks
-from muflow.patches import random_patches, repr_patches
+from muflow.patch_utils import random_patches, repr_patches, make_patch_transform
 
 
 CSV_PATH = os.path.join(c.WORKING_DIR, 'data', 'dataset_split_rand.csv')
-
-
-def make_patch_transform(norm_mean=None, norm_std=None):
-    """Patch → tensor pipeline: ToTensor + backbone-specific Normalize.
-
-    No resize, no augmentation — patches are already native P×P crops.
-    """
-    mean = norm_mean if norm_mean is not None else c.IMAGENET_MEAN
-    std  = norm_std  if norm_std  is not None else c.IMAGENET_STD
-    return transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean, std),
-    ])
 
 
 def filter_files_by_csv_split(image_files, is_train, is_val=False):

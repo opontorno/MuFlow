@@ -10,6 +10,60 @@ from muflow import constants as const
 import numpy as np
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Backbone factory (shared by FastFlow and feature-extraction scripts)
+# ════════════════════════════════════════════════════════════════════════════
+
+def build_backbone(model_name: str, config: dict, device=None):
+    """
+    Build and return a frozen backbone for feature extraction.
+
+    Used by generate_parameters.py and analyze_means.py (script-level
+    feature extraction) — separate from the FastFlow constructor so the
+    backbone-building logic lives in one place.
+
+    Returns:
+        backbone      : nn.Module (eval, frozen, on device)
+        backbone_type : str — 'cnn' | 'dino' | 'clip' | 'cait_deit'
+        out_indices   : list[int]
+        device        : torch.device
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    out_indices = config.get("out_indices", [1, 2, 3])
+
+    if model_name in [const.BACKBONE_CAIT, const.BACKBONE_DEIT]:
+        backbone = timm.create_model(
+            config.get("backbone_name", model_name), pretrained=True, in_chans=3
+        )
+        backbone_type = "cait_deit"
+
+    elif model_name in const.DINO_BACKBONES:
+        backbone = timm.create_model(
+            const.DINO_TIMM_NAMES[model_name], pretrained=True,
+            img_size=config["input_size"]
+        )
+        backbone_type = "dino"
+
+    elif model_name in const.CLIP_BACKBONES:
+        backbone = CLIPVisualExtractor(model_name, out_block_indices=out_indices)
+        backbone_type = "clip"
+
+    else:  # CNN (ResNet, WideResNet, DenseNet …)
+        backbone = timm.create_model(
+            config.get("backbone_name", model_name),
+            pretrained=True, features_only=True, in_chans=3, out_indices=out_indices
+        )
+        backbone_type = "cnn"
+
+    for param in backbone.parameters():
+        param.requires_grad = False
+    backbone.eval().to(device)
+
+    return backbone, backbone_type, out_indices, device
+
+
 class CLIPVisualExtractor(nn.Module):
     """
     Wraps the official OpenAI CLIP ViT visual encoder and exposes intermediate
@@ -279,8 +333,7 @@ class FastFlow(nn.Module):
                 'mahalanobis'  (float) — mean Mahalanobis distance across layers
         """
         from PIL import Image as _PIL
-        from muflow.dataset import make_patch_transform
-        from muflow.patches import repr_patches
+        from muflow.patch_utils import make_patch_transform, repr_patches
 
         if isinstance(image, np.ndarray):
             image = _PIL.fromarray(image.astype(np.uint8))

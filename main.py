@@ -130,10 +130,6 @@ def parse_args():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Utilities
-# ═══════════════════════════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════════════════════════
 # Champion promotion helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -288,10 +284,6 @@ def build_optimizer(args, model, config):
         raise ValueError(f"Unknown optimizer: {args.optimizer}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Training
-# ═══════════════════════════════════════════════════════════════════════════
-
 def score_per_image(model, patches):
     """Aggregate per-patch scores into one score per image.
 
@@ -350,10 +342,6 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
     return train_mean, train_std, preds_train
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Threshold & Evaluation
-# ═══════════════════════════════════════════════════════════════════════════
-
 def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto', alpha=0.1):
     """Compute anomaly-detection threshold from validation set (real images)."""
     model.eval()
@@ -393,7 +381,7 @@ def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto'
 
 
 def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx,
-                           y_true_0_base, y_pred_0_base, preds_0_base):
+                           y_true_0_base, y_pred_0_base, preds_0_base, mu_val):
     """Helper function to compute metrics for a single class in parallel.
 
     y_pred_0_base : binary predictions for the baseline class (for accuracy)
@@ -433,14 +421,16 @@ def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx,
     _best_b           = np.argmax(_tpr_b - _fpr_b)
     _preds_oracle_b   = (_distances >= _thr_b[_best_b]).astype(np.int8)
 
+    scores_bilateral = np.abs(scores_balanced - mu_val)
+
     return {
         'class_id':          c, 'class_name': class_name, 'min_len': min_len,
         'loss_mean':         loss_mean_fake, 'loss_std': loss_std_fake,
         'accuracy':          accuracy_score(y_true_binary, y_pred_balanced),
         'acc_oracle':        accuracy_score(y_true_binary, _preds_oracle),
         'acc_oracle_bi':     accuracy_score(y_true_binary, _preds_oracle_b),
-        'ap':                average_precision_score(y_true_binary, scores_balanced),
-        'roc':               roc_auc_score(y_true_binary, scores_balanced),
+        'ap':                average_precision_score(y_true_binary, scores_bilateral),
+        'roc':               roc_auc_score(y_true_binary, scores_bilateral),
     }
 
 
@@ -513,6 +503,13 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
     y_pred_0 = preds[mask_0]    # binary
     preds_0  = preds_[mask_0]   # continuous
 
+    mu_val = threshold_info.get('mean') if isinstance(threshold_info, dict) else None
+    if isinstance(mu_val, np.ndarray):
+        mu_val = float(mu_val)
+    if mu_val is None:
+        mu_val = float(preds_0.mean()) if len(preds_0) > 0 else 0.0
+        print("[warn] threshold_info has no 'mean'; folding AP/ROC around the test real mean.")
+
     loss_mean_real = loss_std_real = 0.0
     if len(preds_0) > 0:
         loss_mean_real = preds_0.mean()
@@ -554,7 +551,7 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
     metrics_real_start_time = time.time()
     results = Parallel(n_jobs=-1, backend='threading')(
         delayed(_compute_class_metrics)(
-            c, class_masks, labels, preds, preds_, class2idx, y_true_0, y_pred_0, preds_0
+            c, class_masks, labels, preds, preds_, class2idx, y_true_0, y_pred_0, preds_0, mu_val
         ) for c in classes_to_process
     )
 
@@ -605,7 +602,7 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         metrics_ood_start_time = time.time()
         results_ood = Parallel(n_jobs=-1, backend='threading')(
             delayed(_compute_class_metrics)(
-                c, class_masks, labels, preds, preds_, class2idx, y_true_ood_real, y_pred_ood_real, preds_99
+                c, class_masks, labels, preds, preds_, class2idx, y_true_ood_real, y_pred_ood_real, preds_99, mu_val
             ) for c in classes_to_process
         )
         accs_oracle_ood, accs_oracle_bi_ood = [], []
@@ -661,9 +658,10 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         yt_g   = np.concatenate([np.ones(min_n, dtype=np.int8),
                                   np.zeros(min_n, dtype=np.int8)])
 
+        sc_g_bi = np.abs(sc_g - mu_val)
         acc_g  = accuracy_score(yt_g, yp_g)
-        ap_g   = average_precision_score(yt_g, sc_g)
-        roc_g  = roc_auc_score(yt_g, sc_g)
+        ap_g   = average_precision_score(yt_g, sc_g_bi)
+        roc_g  = roc_auc_score(yt_g, sc_g_bi)
 
         _fg, _tg, _thr_g = roc_curve(yt_g, sc_g)
         _og = np.argmax(_tg - _fg)
@@ -750,10 +748,6 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
 
     return mean_roc_ood, preds_, labels, metrics_summary
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Main training loop
-# ═══════════════════════════════════════════════════════════════════════════
 
 def train(args, config, canonical_checkpoint_dir):
     checkpoint_dir = const.CHECKPOINT_DIR
@@ -900,7 +894,7 @@ if __name__ == "__main__":
     pprint(config)
 
     # ── Canonical run name (no hyperparams) ─────────────────────────────────
-    canonical_run_name = f"{config['backbone_name']}_{args.reals}_{config['pooling_type']}_patch"
+    canonical_run_name = f"{config['backbone_name']}_{args.reals}_{config['pooling_type']}"
     if args.use_lof:
         canonical_run_name += "_lof"
     else:

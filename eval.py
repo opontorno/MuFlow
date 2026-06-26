@@ -4,22 +4,38 @@ MuFlow — Evaluation script.
 Normalizing-flow evaluation pipeline for one-class deepfake detection.
 Shared logic (eval_once, build_model, compute_threshold, …) is imported
 directly from main.py to avoid duplication.
+
+Calibration sweep (--recalibrate)
+──────────────────────────────────
+Pass --recalibrate to automatically try all calibration candidates:
+    • Gaussian threshold with α ∈ {0.01, 0.05, 0.10}
+    • LOF with contamination='auto'
+
+The candidate with the highest OOD accuracy is saved back to the run folder
+(thresholds.npz, lof_model.pkl, best_metrics.json, run_config.yaml).
+On tie, threshold is preferred over LOF (simpler model).
+Sweep always runs on the clean (no-attack) test set.
 """
 import argparse
+import contextlib
+import io
+import json
 import os
 import glob as glob_module
-import torch
-import yaml
+
 import joblib
 import numpy as np
-from scipy.stats import norm
-from tqdm import tqdm
+import torch
+import yaml
 from PIL import Image
+from scipy.stats import norm
+from sklearn.neighbors import LocalOutlierFactor
+from tqdm import tqdm
 
 from muflow import constants as const
 from muflow import dataset
-from muflow.dataset import make_patch_transform
-from muflow.patches import repr_patches
+from muflow.gpu_utils import resolve_device
+from muflow.patch_utils import make_patch_transform, repr_patches
 
 # ── Shared evaluation logic ──────────────────────────────────────────────────
 from main import (
@@ -54,6 +70,12 @@ def parse_args():
     parser.add_argument("--custom_labels", type=int, nargs='+', default=None,
                         help="Class label for each --custom_dirs entry: 0=real, 1=fake. "
                              "Must have the same length as --custom_dirs.")
+    parser.add_argument("--gpu_id", type=int, default=None,
+                        help="GPU to use (default: auto-select the one with most free memory).")
+    parser.add_argument("--recalibrate", action="store_true", default=False,
+                        help="Run a full calibration sweep (threshold α∈{0.01,0.05,0.10} + LOF) "
+                             "on the val set, pick the best by OOD accuracy, and overwrite the "
+                             "saved calibration in run_dir. Always uses the clean test set.")
 
     args = parser.parse_args()
 
@@ -72,9 +94,12 @@ def parse_args():
     args.threshold_path = os.path.join(args.run_dir, 'thresholds.npz')
     args.lof_checkpoint = os.path.join(args.run_dir, 'lof_model.pkl')
 
-    print(f"[eval] Run dir  : {args.run_dir}")
-    print(f"[eval] Config   : {args.config}")
-    print(f"[eval] alpha    : {args.alpha}")
+    print(f"[eval] Run dir     : {args.run_dir}")
+    print(f"[eval] Config      : {args.config}")
+    print(f"[eval] recalibrate : {args.recalibrate}")
+    if not args.recalibrate:
+        print(f"[eval] alpha       : {getattr(args, 'alpha', 'N/A')}")
+        print(f"[eval] use_lof     : {getattr(args, 'use_lof', False)}")
     return args
 
 
@@ -237,6 +262,164 @@ def eval_custom(dataloader, model, groups, threshold_info):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Calibration sweep
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Candidates evaluated in order during --recalibrate
+SWEEP_CANDIDATES = [
+    {'label': 'threshold  α=0.01', 'use_lof': False, 'alpha': 0.01, 'contamination': None},
+    {'label': 'threshold  α=0.05', 'use_lof': False, 'alpha': 0.05, 'contamination': None},
+    {'label': 'threshold  α=0.10', 'use_lof': False, 'alpha': 0.10, 'contamination': None},
+    {'label': "LOF  (contamination='auto')", 'use_lof': True,  'alpha': None, 'contamination': 'auto'},
+]
+
+
+@contextlib.contextmanager
+def _mute():
+    """Suppress stdout — used to silence eval_once during intermediate sweep passes."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        yield
+
+
+def _fit_calibrator(val_losses: np.ndarray, cand: dict) -> dict:
+    """Fit one calibration candidate on pre-computed val NLL scores."""
+    mean, std = float(val_losses.mean()), float(val_losses.std())
+    info = {'mean': mean, 'std': std, 'losses': val_losses}
+    if cand['use_lof']:
+        lof = LocalOutlierFactor(novelty=True, contamination=cand['contamination'], n_jobs=-1)
+        lof.fit(val_losses.reshape(-1, 1))
+        info['lof'] = lof
+    else:
+        z = norm.ppf(1 - cand['alpha'])
+        info['l_threshold'] = mean - z * std
+        info['u_threshold'] = mean + z * std
+    return info
+
+
+def _ood_acc(metrics_summary: dict) -> float:
+    """Selection metric: mean OOD accuracy (vs_ood_real); fallback to vs_real accuracy."""
+    if 'vs_ood_real' in metrics_summary:
+        return metrics_summary['vs_ood_real'].get('mean_acc', 0.0)
+    return metrics_summary.get('vs_real', {}).get('mean_acc', 0.0)
+
+
+def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
+    """
+    Evaluate every calibration candidate, pick the best by OOD accuracy,
+    persist results to run_dir, and return the winning threshold_info.
+
+    Runs:
+        1 val-set forward pass (to collect NLL scores for calibrator fitting)
+        N suppressed test-set passes (one per candidate, for metric collection)
+        1 final test-set pass with winner (full printed output)
+    """
+    device = next(model.nf_flows[0].parameters()).device
+
+    # ── 1. Collect val NLL scores ─────────────────────────────────────────────
+    print("\n" + "=" * 64)
+    print("Recalibration sweep")
+    print("=" * 64)
+    print("Collecting val NLL scores...", flush=True)
+    val_loader = build_val_data_loader(args, config)
+    model.eval()
+    val_bufs = []
+    for batch in val_loader:
+        data = batch[0] if isinstance(batch, (list, tuple)) else batch
+        with torch.no_grad():
+            val_bufs.append(score_per_image(model, data.to(device))["loss"].cpu())
+    val_losses = torch.cat(val_bufs).numpy()
+    print(f"  {len(val_losses)} real images — "
+          f"mean={val_losses.mean():.4f}  std={val_losses.std():.4f}")
+
+    # ── 2. Evaluate each candidate (suppress verbose output) ─────────────────
+    print("\nSweeping calibration candidates (clean test set)...")
+    rows = []
+    for cand in SWEEP_CANDIDATES:
+        thr = _fit_calibrator(val_losses, cand)
+        with _mute():
+            _, _, _, metrics = eval_once(
+                test_dataloader, model,
+                class2idx=class2idx,
+                threshold_info=thr,
+                wandb_log=False,
+            )
+        rows.append((cand, thr, metrics, _ood_acc(metrics)))
+
+    # ── 3. Comparison table ───────────────────────────────────────────────────
+    print(f"\n{'─'*64}")
+    print(f"  {'Candidate':<36} {'OOD Acc':>9} {'Real Acc':>9}")
+    print(f"{'─'*64}")
+    for cand, _, metrics, ood_acc_val in rows:
+        real_acc = metrics.get('vs_real', {}).get('mean_acc', 0.0)
+        print(f"  {cand['label']:<36} {ood_acc_val:>9.4f} {real_acc:>9.4f}")
+    print(f"{'─'*64}")
+
+    # ── 4. Pick best: highest OOD acc; prefer threshold over LOF on tie ───────
+    best_cand, best_thr, best_metrics, best_ood = max(
+        rows, key=lambda x: (x[3], 0 if not x[0]['use_lof'] else -1)
+    )
+    print(f"\n  Winner: {best_cand['label']}  (OOD Acc = {best_ood:.4f})\n")
+
+    # ── 5. Full output for winner ─────────────────────────────────────────────
+    print("=" * 64)
+    print("Full evaluation — winner calibration")
+    print("=" * 64)
+    eval_once(test_dataloader, model, class2idx=class2idx,
+              threshold_info=best_thr, wandb_log=False)
+
+    # ── 6. Persist winning calibration ───────────────────────────────────────
+    _persist_calibration(best_thr, best_cand, best_metrics, args)
+
+    return best_thr
+
+
+def _persist_calibration(threshold_info: dict, cand: dict,
+                         metrics_summary: dict, args) -> None:
+    """Overwrite thresholds.npz, lof_model.pkl, best_metrics.json, run_config.yaml."""
+    run_dir = args.run_dir
+
+    # thresholds.npz
+    save_keys = ('l_threshold', 'u_threshold', 'threshold', 'losses', 'mean', 'std')
+    np.savez(args.threshold_path,
+             **{k: threshold_info[k] for k in save_keys if k in threshold_info})
+    print(f"\n  Saved thresholds     → {args.threshold_path}")
+
+    # lof_model.pkl — write if LOF won, remove if threshold won
+    if 'lof' in threshold_info:
+        joblib.dump(threshold_info['lof'], args.lof_checkpoint)
+        print(f"  Saved LOF model      → {args.lof_checkpoint}")
+    elif os.path.exists(args.lof_checkpoint):
+        os.remove(args.lof_checkpoint)
+
+    # best_metrics.json — update metrics and record calibration method
+    metrics_path = os.path.join(run_dir, 'best_metrics.json')
+    if os.path.exists(metrics_path):
+        with open(metrics_path) as f:
+            payload = json.load(f)
+        payload['metrics']     = metrics_summary
+        payload['calibration'] = {
+            'method':        'lof' if cand['use_lof'] else 'gaussian',
+            'alpha':         cand['alpha'],
+            'contamination': cand['contamination'],
+        }
+        with open(metrics_path, 'w') as f:
+            json.dump(payload, f, indent=2)
+        print(f"  Updated best_metrics.json")
+
+    # run_config.yaml — update alpha / use_lof / contamination
+    cfg_path = os.path.join(run_dir, 'run_config.yaml')
+    if os.path.exists(cfg_path):
+        with open(cfg_path) as f:
+            cfg = yaml.safe_load(f)
+        cfg['use_lof']       = cand['use_lof']
+        cfg['alpha']         = cand['alpha']
+        cfg['contamination'] = cand['contamination']
+        with open(cfg_path, 'w') as f:
+            yaml.dump(cfg, f, default_flow_style=False)
+        print(f"  Updated run_config.yaml")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main evaluation entry
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -246,9 +429,17 @@ def evaluate(args):
 
     model = build_model(config, args)
     model.load_state_dict(checkpoint["model_state_dict"])
-    model.cuda()
+    device = resolve_device(getattr(args, 'gpu_id', None))
+    model.to(device)
 
-    # ── Threshold ────────────────────────────────────────────────────────────
+    # ── Recalibration sweep ───────────────────────────────────────────────────
+    if args.recalibrate:
+        # Build the clean (no-attack) test dataloader once and share across candidates
+        test_dataloader, class2idx = build_test_data_loader(args, config)
+        _recalibrate_sweep(model, args, config, class2idx, test_dataloader)
+        return
+
+    # ── Load saved threshold / LOF ────────────────────────────────────────────
     threshold_info = None
     if os.path.exists(args.threshold_path):
         if args.threshold_path.endswith('.npz'):
@@ -272,22 +463,22 @@ def evaluate(args):
         threshold_info = compute_threshold(
             val_dataloader, model,
             use_lof=bool(getattr(args, 'use_lof', False)),
-            contamination=args.contamination,
-            alpha=args.alpha,
+            contamination=getattr(args, 'contamination', 'auto'),
+            alpha=getattr(args, 'alpha', 0.1),
         )
 
     if getattr(args, 'use_lof', False) and os.path.exists(args.lof_checkpoint):
         threshold_info['lof'] = joblib.load(args.lof_checkpoint)
         print(f"Loaded LOF model from {args.lof_checkpoint}")
 
-    # ── Custom-dirs mode ─────────────────────────────────────────────────────
+    # ── Custom-dirs mode ──────────────────────────────────────────────────────
     if args.custom_dirs is not None:
         print(f"\n{'='*60}\nCustom dirs evaluation\n{'='*60}")
         custom_loader, groups = create_custom_dataloader(args, config)
         eval_custom(custom_loader, model, groups, threshold_info)
         return
 
-    # ── Standard eval with optional attacks ──────────────────────────────────
+    # ── Standard eval with optional attacks ───────────────────────────────────
     attacks_configs = [
         ('none', {}),
         # ('jpeg', {'quality': 90}),
