@@ -1,20 +1,3 @@
-"""
-analyze_means.py — Are the PATCH-CENTROID representations of MEAN images
-discriminative? (gate for the patch-based redesign, branch `patches`)
-
-Representation under test (the µFlow representation):
-    image  →  k native patches (crop = input_size, NO resize)
-           →  backbone features per patch  →  spatial pool
-           →  MEAN over patches  →  image centroid
-
-Computes that centroid for every mean image, then checks real/fake
-separability per layer — quantitatively (logistic probe, 5-fold CV) and
-visually (t-SNE scatter: circles = real, crosses = fake).
-
-Usage:
-    python scripts/analyze_means.py --model_name resnet50 \
-        --means-dir <DATA_DIR>/datasets_means/500 --num-patches 16 --sample-size 120
-"""
 import argparse
 import os
 import random
@@ -38,16 +21,22 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 PICTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pictures")
 
-# Sources considered REAL (normalised: lowercase, '_'→' '); rest = fake.
 REAL_SOURCES = {"ffhq", "celeba hq"}
 
 
 def _norm(s: str) -> str:
+    """Normalize a source name for comparison.
+    s: source name.
+    Returns: lowercased, underscore-to-space, stripped string.
+    """
     return s.lower().replace("_", " ").strip()
 
 
 def get_args():
-    p = argparse.ArgumentParser(description=__doc__)
+    """Parse command-line arguments.
+    Returns: argparse.Namespace.
+    """
+    p = argparse.ArgumentParser()
     p.add_argument("--model_name", type=str, default="resnet50",
                    help="Backbone name (must have a configs/<model_name>.yaml).")
     p.add_argument("--means-dir", type=str,
@@ -61,13 +50,24 @@ def get_args():
     return p.parse_args()
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Data collection
-# ════════════════════════════════════════════════════════════════════════════
-
 def collect(means_dir, sources, P, k, seed, sample_size,
             backbone, backbone_type, out_indices, pooling, norm_mean, norm_std, device):
-    """Return {layer_idx: (X, y, source_labels)} — y=1 fake / 0 real."""
+    """Compute per-layer patch-centroid features for every source.
+    means_dir: directory with one subfolder of mean images per source.
+    sources: source subfolder names.
+    P: patch side.
+    k: patches per image.
+    seed: RNG seed for the patches.
+    sample_size: max mean images sampled per source.
+    backbone: frozen backbone.
+    backbone_type: backbone family string.
+    out_indices: layer indices.
+    pooling: spatial pooling mode.
+    norm_mean: normalization mean.
+    norm_std: normalization std.
+    device: torch device.
+    Returns: dict {layer_idx: (X, y, source_labels)} with y=1 fake / 0 real.
+    """
     num_layers   = len(out_indices)
     by_layer_X   = {i: [] for i in range(num_layers)}
     y, labels    = [], []
@@ -94,10 +94,6 @@ def collect(means_dir, sources, P, k, seed, sample_size,
     return {i: (np.array(by_layer_X[i]), np.array(y), np.array(labels))
             for i in range(num_layers)}
 
-
-# ════════════════════════════════════════════════════════════════════════════
-# Main
-# ════════════════════════════════════════════════════════════════════════════
 
 def main():
     args = get_args()
@@ -126,7 +122,6 @@ def main():
                         args.sample_size, backbone, backbone_type, out_indices,
                         pooling, norm_mean, norm_std, device)
 
-    # ── Separability (logistic probe) + t-SNE, per layer ────────────────────
     print("\n" + "=" * 64)
     print(f"Real-vs-fake separability of MEAN patch-centroids  ({args.model_name})")
     print("=" * 64)
@@ -165,9 +160,6 @@ def main():
         out = os.path.join(PICTURES_DIR, f"patchmeans_{args.model_name}_layer{i}.png")
         fig.savefig(out, dpi=150); plt.close(fig)
         print(f"           → {out}")
-
-    print("\nReals = circles, fakes = crosses. High probe AUC ⇒ mean patch-centroids "
-          "are discriminative ⇒ average-image GMM target is viable.")
 
 
 if __name__ == "__main__":

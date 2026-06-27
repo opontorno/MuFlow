@@ -1,9 +1,3 @@
-"""
-Robustness attacks / image degradations for MuFlow evaluation.
-
-Each attack takes and returns a PIL.Image. Used at test time (see eval.py
-attacks_configs) to measure robustness to content-preserving perturbations.
-"""
 import io
 import random
 
@@ -13,20 +7,21 @@ from PIL import Image
 
 
 class RobustnessAttacks:
-    """Class to apply various robustness attacks to images"""
-
     def __init__(self, attack_type='none', **attack_params):
         """
-        Args:
-            attack_type: attack type ('none', 'jpeg', 'gaussian_blur', 'rotation',
-                        'gaussian_noise', 'salt_pepper', 'resize', 'crop', 'random_crop')
-            attack_params: specific parameters for the attack
+        attack_type: one of 'none', 'jpeg', 'gaussian_blur', 'rotation',
+                     'gaussian_noise', 'salt_pepper', 'resize', 'crop',
+                     'random_crop', 'horizontal_flip'.
+        attack_params: keyword parameters specific to the chosen attack.
         """
         self.attack_type = attack_type
         self.attack_params = attack_params
 
     def apply(self, image):
-        """Apply attack to image"""
+        """Apply the configured attack to an image.
+        image: input PIL.Image.
+        Returns: degraded PIL.Image (unchanged if attack_type is 'none').
+        """
         if self.attack_type == 'none':
             return image
         elif self.attack_type == 'jpeg':
@@ -51,12 +46,12 @@ class RobustnessAttacks:
             raise ValueError(f"Unknown attack type: {self.attack_type}")
 
     def jpeg_compression(self, image):
-        """JPEG compression con quality factor specificato"""
+        """JPEG-recompress an image.
+        image: input PIL.Image.
+        Returns: PIL.Image recompressed at attack_params['quality'] (default 75).
+        """
         quality = self.attack_params.get('quality', 75)
-
-        # Converti PIL in array se necessario
         if isinstance(image, Image.Image):
-            # Save to buffer with JPEG compression
             buffer = io.BytesIO()
             image.save(buffer, format='JPEG', quality=quality)
             buffer.seek(0)
@@ -65,10 +60,12 @@ class RobustnessAttacks:
             raise ValueError("JPEG compression requires PIL Image")
 
     def gaussian_blur(self, image):
-        """Gaussian blur"""
+        """Gaussian-blur an image.
+        image: input PIL.Image.
+        Returns: PIL.Image blurred with attack_params['kernel_size'] and ['sigma'].
+        """
         kernel_size = self.attack_params.get('kernel_size', 5)
         sigma = self.attack_params.get('sigma', 1.0)
-
         if isinstance(image, Image.Image):
             img_array = np.array(image)
             blurred = cv2.GaussianBlur(img_array, (kernel_size, kernel_size), sigma)
@@ -77,19 +74,23 @@ class RobustnessAttacks:
             raise ValueError("Gaussian blur requires PIL Image")
 
     def rotation(self, image):
-        """Rotate the image"""
+        """Rotate an image.
+        image: input PIL.Image.
+        Returns: PIL.Image rotated by attack_params['angle'] (default 10°).
+        """
         angle = self.attack_params.get('angle', 10)
-
         if isinstance(image, Image.Image):
             return image.rotate(angle, resample=Image.BILINEAR, expand=False)
         else:
             raise ValueError("Rotation requires PIL Image")
 
     def gaussian_noise(self, image):
-        """Add Gaussian noise"""
+        """Add Gaussian noise to an image.
+        image: input PIL.Image.
+        Returns: PIL.Image with noise of attack_params['mean'] and ['std'].
+        """
         mean = self.attack_params.get('mean', 0)
         std = self.attack_params.get('std', 0.1)
-
         if isinstance(image, Image.Image):
             img_array = np.array(image).astype(np.float32) / 255.0
             noise = np.random.normal(mean, std, img_array.shape)
@@ -99,29 +100,29 @@ class RobustnessAttacks:
             raise ValueError("Gaussian noise requires PIL Image")
 
     def salt_pepper_noise(self, image):
-        """Add salt-and-pepper noise"""
+        """Add salt-and-pepper noise to an image.
+        image: input PIL.Image.
+        Returns: PIL.Image corrupted with attack_params['amount'] of pixels.
+        """
         amount = self.attack_params.get('amount', 0.05)
-
         if isinstance(image, Image.Image):
             img_array = np.array(image)
-            # Salt
             num_salt = np.ceil(amount * img_array.size * 0.5)
             coords = [np.random.randint(0, i - 1, int(num_salt)) for i in img_array.shape[:2]]
             img_array[coords[0], coords[1], :] = 255
-
-            # Pepper
             num_pepper = np.ceil(amount * img_array.size * 0.5)
             coords = [np.random.randint(0, i - 1, int(num_pepper)) for i in img_array.shape[:2]]
             img_array[coords[0], coords[1], :] = 0
-
             return Image.fromarray(img_array)
         else:
             raise ValueError("Salt-pepper noise requires PIL Image")
 
     def resize_attack(self, image):
-        """Resize to smaller size and then restore"""
+        """Down- then up-scale an image to lose high-frequency detail.
+        image: input PIL.Image.
+        Returns: PIL.Image at original size, via attack_params['scale_factor'].
+        """
         scale_factor = self.attack_params.get('scale_factor', 0.5)
-
         if isinstance(image, Image.Image):
             orig_size = image.size
             new_size = (int(orig_size[0] * scale_factor), int(orig_size[1] * scale_factor))
@@ -131,44 +132,46 @@ class RobustnessAttacks:
             raise ValueError("Resize attack requires PIL Image")
 
     def center_crop(self, image):
-        """Center crop the image"""
+        """Center-crop then resize back to original size.
+        image: input PIL.Image.
+        Returns: PIL.Image cropped by attack_params['crop_ratio'] (default 0.8).
+        """
         crop_ratio = self.attack_params.get('crop_ratio', 0.8)
-
         if isinstance(image, Image.Image):
             width, height = image.size
             new_width = int(width * crop_ratio)
             new_height = int(height * crop_ratio)
-
             left = (width - new_width) // 2
             top = (height - new_height) // 2
             right = left + new_width
             bottom = top + new_height
-
             cropped = image.crop((left, top, right, bottom))
             return cropped.resize((width, height), Image.BILINEAR)
         else:
             raise ValueError("Center crop requires PIL Image")
 
     def random_crop(self, image):
-        """Random crop keeping crop_ratio of the content, then resize back to original size.
-        Breaks spatial alignment by placing the subject off-center."""
+        """Random-crop then resize back to original size.
+        image: input PIL.Image.
+        Returns: PIL.Image cropped by attack_params['crop_ratio'] (default 0.9).
+        """
         crop_ratio = self.attack_params.get('crop_ratio', 0.9)
-
         if isinstance(image, Image.Image):
             width, height = image.size
             crop_w = int(width * crop_ratio)
             crop_h = int(height * crop_ratio)
-
             left = random.randint(0, width - crop_w)
             top = random.randint(0, height - crop_h)
-
             cropped = image.crop((left, top, left + crop_w, top + crop_h))
             return cropped.resize((width, height), Image.BILINEAR)
         else:
             raise ValueError("Random crop requires PIL Image")
 
     def horizontal_flip(self, image):
-        """Horizontal flip of the image"""
+        """Horizontally flip an image.
+        image: input PIL.Image.
+        Returns: flipped PIL.Image.
+        """
         if isinstance(image, Image.Image):
             return image.transpose(Image.FLIP_LEFT_RIGHT)
         else:

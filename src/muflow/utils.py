@@ -1,6 +1,4 @@
 class AverageMeter:
-    """Computes and stores the average and current value"""
-
     def __init__(self):
         self.reset()
 
@@ -11,6 +9,10 @@ class AverageMeter:
         self.count = 0
 
     def update(self, val, n=1):
+        """Update the running average.
+        val: new value.
+        n: weight/count of the new value.
+        """
         self.val = val
         self.sum += val * n
         self.count += n

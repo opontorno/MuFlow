@@ -1,33 +1,3 @@
-"""
-patch_utils.py — Shared patch-extraction and feature-computation utilities.
-
-Central module for all patch-based operations in µFlow:
-
-  Patch extraction
-  ─────────────────
-  _center_square      fallback for images smaller than the target P
-  random_patches      k random native crops (training)
-  repr_patches        k deterministic crops (fixed seed; inference & GMM)
-
-  Transform
-  ─────────
-  make_patch_transform  ToTensor + backbone-specific Normalize (no resize)
-
-  Feature pooling
-  ───────────────
-  pool_features       (B, C, H, W) tensor → 1-D numpy vector
-
-  Feature extraction
-  ──────────────────
-  extract_features    PIL patch → list of (1, C, H, W) tensors, one per layer
-                      (backbone-agnostic; handles CNN / DINOv2 / CLIP / CaiT-DeiT)
-
-  Centroid representation
-  ───────────────────────
-  image_centroid      PIL image → list of 1-D numpy vectors (one per layer)
-                      = mean of pooled features over repr_patches
-                      used by generate_parameters and analyze_means
-"""
 import numpy as np
 import torch
 from PIL import Image
@@ -36,12 +6,12 @@ from torchvision import transforms
 from muflow import constants as const
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Patch extraction
-# ════════════════════════════════════════════════════════════════════════════
-
-def _center_square(img: Image.Image, P: int) -> Image.Image:
-    """Center-crop to the short side; resize up to P only if unavoidable."""
+def _center_square(img, P):
+    """Center-crop an image to its short side, resizing to P only if needed.
+    img: PIL.Image.
+    P: target patch side.
+    Returns: PIL.Image of side P.
+    """
     W, H = img.size
     s = min(W, H)
     left, top = (W - s) // 2, (H - s) // 2
@@ -51,8 +21,13 @@ def _center_square(img: Image.Image, P: int) -> Image.Image:
     return crop
 
 
-def random_patches(img: Image.Image, P: int, k: int) -> list:
-    """k random native P×P crops (positions from torch RNG → per-worker/epoch seeded)."""
+def random_patches(img, P, k):
+    """Crop k random native P×P patches (torch RNG positions).
+    img: PIL.Image.
+    P: patch side.
+    k: number of patches.
+    Returns: list of k PIL.Image patches.
+    """
     W, H = img.size
     if W < P or H < P:
         return [_center_square(img, P)] * k
@@ -64,8 +39,14 @@ def random_patches(img: Image.Image, P: int, k: int) -> list:
     return out
 
 
-def repr_patches(img: Image.Image, P: int, k: int, seed: int) -> list:
-    """k deterministic native P×P crops (fixed seed → reproducible representation)."""
+def repr_patches(img, P, k, seed):
+    """Crop k deterministic native P×P patches (fixed-seed positions).
+    img: PIL.Image.
+    P: patch side.
+    k: number of patches.
+    seed: RNG seed for reproducible positions.
+    Returns: list of k PIL.Image patches.
+    """
     W, H = img.size
     if W < P or H < P:
         return [_center_square(img, P)] * k
@@ -78,12 +59,12 @@ def repr_patches(img: Image.Image, P: int, k: int, seed: int) -> list:
     return out
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Transform
-# ════════════════════════════════════════════════════════════════════════════
-
 def make_patch_transform(norm_mean=None, norm_std=None):
-    """ToTensor + backbone-specific Normalize. No resize — patches are already P×P."""
+    """Build the patch tensor transform (ToTensor + Normalize, no resize).
+    norm_mean: normalization mean, or None for ImageNet.
+    norm_std: normalization std, or None for ImageNet.
+    Returns: torchvision transform.
+    """
     mean = norm_mean if norm_mean is not None else const.IMAGENET_MEAN
     std  = norm_std  if norm_std  is not None else const.IMAGENET_STD
     return transforms.Compose([
@@ -92,12 +73,12 @@ def make_patch_transform(norm_mean=None, norm_std=None):
     ])
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Feature pooling
-# ════════════════════════════════════════════════════════════════════════════
-
-def pool_features(feats: torch.Tensor, pooling_type: str) -> np.ndarray:
-    """Spatial pooling of a (B, C, H, W) feature map → 1-D numpy vector."""
+def pool_features(feats, pooling_type):
+    """Spatially pool a feature map into a 1-D vector.
+    feats: (B, C, H, W) tensor.
+    pooling_type: 'mean', 'max', 'mean_std', 'flatten', else full flatten.
+    Returns: 1-D numpy vector.
+    """
     if pooling_type == 'mean':
         return feats.mean(dim=(2, 3)).flatten().cpu().numpy()
     elif pooling_type == 'max':
@@ -108,38 +89,22 @@ def pool_features(feats: torch.Tensor, pooling_type: str) -> np.ndarray:
         return np.concatenate([m, s])
     elif pooling_type == 'flatten':
         return feats.mean(-1).flatten(1).cpu().numpy().squeeze(0)
-    else:  # full_flatten
+    else:
         return feats.flatten(1).cpu().numpy().squeeze(0)
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Feature extraction  (backbone-agnostic)
-# ════════════════════════════════════════════════════════════════════════════
-
-def extract_features(
-    patch,
-    backbone,
-    backbone_type: str,
-    out_indices,
-    input_size: int,
-    norm_mean,
-    norm_std,
-    device,
-) -> list:
-    """
-    Extract backbone features from a single native patch.
-
-    Args:
-        patch         : PIL Image (P×P) or np.ndarray (P×P×3 uint8)
-        backbone      : frozen backbone model (eval mode)
-        backbone_type : 'cnn' | 'dino' | 'clip' | 'cait_deit'
-        out_indices   : layer indices (used for DINO forward)
-        input_size    : backbone input side P (used for DeiT/CaiT token reshape)
-        norm_mean, norm_std : backbone-specific normalisation stats
-        device        : torch.device
-
-    Returns:
-        list of (1, C, H, W) float tensors — one per requested layer
+def extract_features(patch, backbone, backbone_type, out_indices, input_size,
+                     norm_mean, norm_std, device):
+    """Extract per-layer backbone features from a single patch.
+    patch: PIL.Image or HxWx3 uint8 numpy array at side input_size.
+    backbone: frozen backbone in eval mode.
+    backbone_type: 'cnn', 'dino', 'clip' or 'cait_deit'.
+    out_indices: layer indices (used for the DINO forward).
+    input_size: patch side (used for DeiT/CaiT token reshape).
+    norm_mean: normalization mean.
+    norm_std: normalization std.
+    device: torch device.
+    Returns: list of (1, C, H, W) feature tensors, one per layer.
     """
     import timm.models.vision_transformer as _vit
 
@@ -152,7 +117,7 @@ def extract_features(
 
     with torch.no_grad():
         if backbone_type == 'cait_deit':
-            if isinstance(backbone, _vit.VisionTransformer):  # DeiT
+            if isinstance(backbone, _vit.VisionTransformer):
                 x = backbone.patch_embed(img_t)
                 cls = backbone.cls_token.expand(x.shape[0], -1, -1)
                 if backbone.dist_token is None:
@@ -165,7 +130,7 @@ def extract_features(
                 x = backbone.norm(x)[:, 2:, :]
                 N, _, C = x.shape
                 return [x.permute(0, 2, 1).reshape(N, C, input_size // 16, input_size // 16)]
-            else:  # CaiT
+            else:
                 x = backbone.patch_embed(img_t) + backbone.pos_embed
                 x = backbone.pos_drop(x)
                 for i in range(41):
@@ -177,37 +142,26 @@ def extract_features(
         elif backbone_type == 'dino':
             return list(backbone.get_intermediate_layers(img_t, n=list(out_indices), reshape=True))
 
-        else:  # cnn / clip
+        else:
             return list(backbone(img_t))
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Centroid representation
-# ════════════════════════════════════════════════════════════════════════════
-
-def image_centroid(
-    img: Image.Image,
-    P: int,
-    k: int,
-    seed: int,
-    backbone,
-    backbone_type: str,
-    out_indices,
-    input_size: int,
-    pooling_type: str,
-    norm_mean,
-    norm_std,
-    device,
-) -> list:
-    """
-    Patch-centroid representation of one image, per backbone layer.
-
-    Crops k deterministic P×P patches (seed-fixed), extracts and pools
-    features per patch, then averages across patches → one centroid vector
-    per layer. Used by generate_parameters (GMM fitting) and analyze_means.
-
-    Returns:
-        list of 1-D np.ndarray, one per layer (len = len(out_indices))
+def image_centroid(img, P, k, seed, backbone, backbone_type, out_indices,
+                   input_size, pooling_type, norm_mean, norm_std, device):
+    """Patch-centroid representation of one image, per backbone layer.
+    img: PIL.Image.
+    P: patch side.
+    k: number of deterministic patches.
+    seed: RNG seed for the patches.
+    backbone: frozen backbone.
+    backbone_type: backbone family string.
+    out_indices: layer indices.
+    input_size: patch side for token reshape.
+    pooling_type: spatial pooling mode.
+    norm_mean: normalization mean.
+    norm_std: normalization std.
+    device: torch device.
+    Returns: list of 1-D numpy vectors, one per layer (mean of pooled patch features).
     """
     plist = repr_patches(img, P, k, seed)
     per_layer = None

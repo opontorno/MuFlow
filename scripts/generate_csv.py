@@ -18,8 +18,11 @@ N_FAKE_PER_CLASS = 1000
 
 
 def split_by_class(pattern, label="class"):
-    """Glob files matching pattern, group by generator (path[-2]), cap at
-    N_FAKE_PER_CLASS, then split 70-15-15 per class."""
+    """Split files grouped by generator, capped per class, into 70-15-15.
+    pattern: glob pattern (generator = second-to-last path component).
+    label: name used in the progress printout.
+    Returns: list of [path, split] rows.
+    """
     files_by_class = defaultdict(list)
     for f in glob.glob(pattern):
         files_by_class[f.split(os.sep)[-2]].append(f)
@@ -28,7 +31,7 @@ def split_by_class(pattern, label="class"):
     rows = []
     for cls, files in sorted(files_by_class.items()):
         random.shuffle(files)
-        files = files[:N_FAKE_PER_CLASS]          # cap to 1000
+        files = files[:N_FAKE_PER_CLASS]
         n_train = int(len(files) * 0.70)
         n_val   = int(len(files) * 0.15)
         splits  = (["train"] * n_train
@@ -41,7 +44,11 @@ def split_by_class(pattern, label="class"):
 
 
 def split_random(pattern, label=""):
-    """Glob files matching pattern, random 70-15-15 split (no class grouping)."""
+    """Split files into a random 70-15-15 split (no class grouping).
+    pattern: glob pattern (recursive).
+    label: name used in the progress printout.
+    Returns: list of [path, split] rows.
+    """
     files = glob.glob(pattern, recursive=True)
     random.shuffle(files)
     n_train = int(len(files) * 0.70)
@@ -54,40 +61,21 @@ def split_random(pattern, label=""):
     return rows
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. FFHQ — real training images
-#    Structure: ffhq/<subfolder>/<image>.png
-# ─────────────────────────────────────────────────────────────────────────────
 csv_data += split_random(
     os.path.join(ROOT, "ffhq", "*", "*.png"),
     label="FFHQ (reals)",
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. WILD — fake images, Closed_Set + Open_Set
-#    Structure: WILD/{Closed_Set,Open_Set}/<generator>/<image>.png
-#    Post-Processed is intentionally excluded (files are deeper than 3 levels).
-# ─────────────────────────────────────────────────────────────────────────────
 csv_data += split_by_class(
     os.path.join(ROOT, "WILD", "*", "*", "*.png"),
     label="WILD (Closed_Set + Open_Set)",
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. datasets_DFX — additional fake generators
-#    Structure: datasets_DFX/<generator>/<image>.png
-# ─────────────────────────────────────────────────────────────────────────────
 csv_data += split_by_class(
     os.path.join(ROOT, "datasets_DFX", "*", "*.png"),
     label="datasets_DFX",
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. CelebA-HQ — OOD real images
-#    train folder → 80 % train / 20 % val (used as threshold-calibration reals)
-#    val folder   → test  (used as OOD real at test time, label 99)
-#    Structure: celeba_hq/{train,val}/{female,male}/<image>.jpg
-# ─────────────────────────────────────────────────────────────────────────────
 print("=" * 60)
 print("Processing CelebA-HQ (OOD reals)")
 
@@ -103,9 +91,6 @@ csv_data += [[f, "test"] for f in celeba_test]
 print(f"  train folder → train={n_train_c} / val={len(celeba_train)-n_train_c}")
 print(f"  val   folder → test={len(celeba_test)}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Save
-# ─────────────────────────────────────────────────────────────────────────────
 os.makedirs(os.path.dirname(output_file), exist_ok=True)
 with open(output_file, "w", newline="") as f:
     writer = csv.writer(f)

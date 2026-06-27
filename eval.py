@@ -1,21 +1,3 @@
-"""
-MuFlow — Evaluation script.
-
-Normalizing-flow evaluation pipeline for one-class deepfake detection.
-Shared logic (eval_once, build_model, compute_threshold, …) is imported
-directly from main.py to avoid duplication.
-
-Calibration sweep (--recalibrate)
-──────────────────────────────────
-Pass --recalibrate to automatically try all calibration candidates:
-    • Gaussian threshold with α ∈ {0.01, 0.05, 0.10}
-    • LOF with contamination='auto'
-
-The candidate with the highest OOD accuracy is saved back to the run folder
-(thresholds.npz, lof_model.pkl, best_metrics.json, run_config.yaml).
-On tie, threshold is preferred over LOF (simpler model).
-Sweep always runs on the clean (no-attack) test set.
-"""
 import argparse
 import contextlib
 import io
@@ -37,10 +19,10 @@ from muflow import dataset
 from muflow.gpu_utils import resolve_device
 from muflow.patch_utils import make_patch_transform, repr_patches
 
-# ── Shared evaluation logic ──────────────────────────────────────────────────
 from main import (
     eval_once,
     score_per_image,
+    _collect_val_scores,
     _compute_class_metrics,
     _aggregate_by_family,
     _print_family_summary,
@@ -52,11 +34,10 @@ from main import (
 )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# CLI
-# ═══════════════════════════════════════════════════════════════════════════
-
 def parse_args():
+    """Parse CLI args and merge them with the run's saved config.
+    Returns: argparse.Namespace with run_config.yaml values and resolved paths.
+    """
     parser = argparse.ArgumentParser(
         description="Evaluate a MuFlow run. All settings are loaded automatically "
                     "from run_dir/run_config.yaml. Only eval-specific options are needed.")
@@ -72,14 +53,17 @@ def parse_args():
                              "Must have the same length as --custom_dirs.")
     parser.add_argument("--gpu_id", type=int, default=None,
                         help="GPU to use (default: auto-select the one with most free memory).")
+    parser.add_argument("--top_k", type=int, default=argparse.SUPPRESS,
+                        help="override the run's top_k patch aggregation (inference-only); "
+                             "recomputes the validation threshold to stay consistent. None/0 = all patches.")
     parser.add_argument("--recalibrate", action="store_true", default=False,
                         help="Run a full calibration sweep (threshold α∈{0.01,0.05,0.10} + LOF) "
                              "on the val set, pick the best by OOD accuracy, and overwrite the "
                              "saved calibration in run_dir. Always uses the clean test set.")
 
     args = parser.parse_args()
+    args._top_k_override = hasattr(args, 'top_k')
 
-    # Load run_config.yaml and attach every key directly onto args
     run_cfg_path = os.path.join(args.run_dir, 'run_config.yaml')
     if not os.path.exists(run_cfg_path):
         parser.error(f"run_config.yaml not found in {args.run_dir}. "
@@ -89,7 +73,6 @@ def parse_args():
         if not hasattr(args, k):
             setattr(args, k, v)
 
-    # Resolve file paths relative to run_dir
     args.checkpoint     = os.path.join(args.run_dir, 'best.pt')
     args.threshold_path = os.path.join(args.run_dir, 'thresholds.npz')
     args.lof_checkpoint = os.path.join(args.run_dir, 'lof_model.pkl')
@@ -103,11 +86,13 @@ def parse_args():
     return args
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Eval-specific data loaders
-# ═══════════════════════════════════════════════════════════════════════════
-
 def create_dataloader(args, config, opt):
+    """Build a test DataLoader with an optional robustness attack.
+    args: parsed CLI args.
+    config: backbone config dict.
+    opt: object carrying attack_type, attack_params and batch_size.
+    Returns: (DataLoader, idx2class).
+    """
     attack_type   = getattr(opt, 'attack_type', 'none')
     attack_params = getattr(opt, 'attack_params', {})
 
@@ -135,11 +120,11 @@ def create_dataloader(args, config, opt):
     return data_loader, {v: k for k, v in test_dataset.class_to_idx.items()}
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Custom-dir helpers
-# ═══════════════════════════════════════════════════════════════════════════
-
 def _dir_name_from_path(path_or_glob):
+    """Derive a readable group name from a path or glob.
+    path_or_glob: folder path or glob pattern.
+    Returns: the last literal path component, or a hash-based fallback.
+    """
     parts = path_or_glob.replace('\\', '/').rstrip('/').split('/')
     for part in reversed(parts):
         if part and '*' not in part and '?' not in part:
@@ -148,6 +133,10 @@ def _dir_name_from_path(path_or_glob):
 
 
 def collect_custom_images(path_or_glob):
+    """Collect image files from a folder or glob.
+    path_or_glob: folder path or glob pattern.
+    Returns: unique list of image file paths.
+    """
     valid_ext = {'.png', '.jpg', '.jpeg'}
     img_exts  = ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']
 
@@ -171,6 +160,14 @@ def collect_custom_images(path_or_glob):
 class CustomImageDataset(torch.utils.data.Dataset):
     def __init__(self, image_paths, labels, input_size, norm_mean=None, norm_std=None,
                  num_repr_patches=const.PATCH_NUM_REPR):
+        """
+        image_paths: list of image file paths.
+        labels: per-image group id / label.
+        input_size: patch side.
+        norm_mean: normalization mean.
+        norm_std: normalization std.
+        num_repr_patches: deterministic patches per image.
+        """
         self.image_paths = image_paths
         self.labels      = labels
         self.P           = input_size if isinstance(input_size, int) else input_size[0]
@@ -181,13 +178,22 @@ class CustomImageDataset(torch.utils.data.Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
+        """Return one item.
+        idx: sample index.
+        Returns: ((N, 3, P, P) patches, label).
+        """
         img = Image.open(self.image_paths[idx]).convert('RGB')
         plist = repr_patches(img, self.P, self.num_repr_patches, const.PATCH_SEED)
-        patches = torch.stack([self.transform(p).float() for p in plist])  # (N, 3, P, P)
+        patches = torch.stack([self.transform(p).float() for p in plist])
         return patches, self.labels[idx]
 
 
 def create_custom_dataloader(args, config):
+    """Build a DataLoader over user-provided custom dirs.
+    args: parsed CLI args (custom_dirs, custom_labels).
+    config: backbone config dict.
+    Returns: (DataLoader, groups metadata list).
+    """
     if args.custom_labels is None or len(args.custom_labels) != len(args.custom_dirs):
         raise ValueError(
             "--custom_labels must be provided and have the same length as --custom_dirs.")
@@ -220,14 +226,28 @@ def create_custom_dataloader(args, config):
 
 
 def eval_custom(dataloader, model, groups, threshold_info):
+    """Score custom dirs and print per-group accuracy.
+    dataloader: DataLoader yielding (patches, group_id).
+    model: FastFlow model.
+    groups: group metadata list from create_custom_dataloader.
+    threshold_info: calibration dict.
+    """
     model.eval()
     preds_list, group_ids_list = [], []
     device = next(model.nf_flows[0].parameters()).device
 
+    ti = threshold_info if isinstance(threshold_info, dict) else {}
+    mu_patch = ti.get('mu_patch')
+    if isinstance(mu_patch, np.ndarray):
+        mu_patch = float(mu_patch)
+    top_k = ti.get('top_k')
+    if isinstance(top_k, np.ndarray):
+        top_k = int(top_k)
+
     for data, gids in tqdm(dataloader, desc="Evaluating custom dirs"):
-        data = data.to(device)                 # (B, N, 3, P, P)
+        data = data.to(device)
         with torch.no_grad():
-            ret = score_per_image(model, data)
+            ret = score_per_image(model, data, top_k=top_k, mu_patch=mu_patch)
         preds_list.append(ret["loss"].cpu())
         group_ids_list.append(gids)
 
@@ -261,11 +281,6 @@ def eval_custom(dataloader, model, groups, threshold_info):
     print("=" * 50)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Calibration sweep
-# ═══════════════════════════════════════════════════════════════════════════
-
-# Candidates evaluated in order during --recalibrate
 SWEEP_CANDIDATES = [
     {'label': 'threshold  α=0.01', 'use_lof': False, 'alpha': 0.01, 'contamination': None},
     {'label': 'threshold  α=0.05', 'use_lof': False, 'alpha': 0.05, 'contamination': None},
@@ -276,15 +291,21 @@ SWEEP_CANDIDATES = [
 
 @contextlib.contextmanager
 def _mute():
-    """Suppress stdout — used to silence eval_once during intermediate sweep passes."""
+    """Context manager that suppresses stdout."""
     with contextlib.redirect_stdout(io.StringIO()):
         yield
 
 
-def _fit_calibrator(val_losses: np.ndarray, cand: dict) -> dict:
-    """Fit one calibration candidate on pre-computed val NLL scores."""
+def _fit_calibrator(val_losses: np.ndarray, cand: dict, mu_patch=None, top_k=None) -> dict:
+    """Fit one calibration candidate on validation scores.
+    val_losses: per-image validation NLL scores.
+    cand: candidate spec (use_lof, alpha, contamination).
+    mu_patch: validation patch-mean to store.
+    top_k: aggregation top_k to store.
+    Returns: threshold_info dict.
+    """
     mean, std = float(val_losses.mean()), float(val_losses.std())
-    info = {'mean': mean, 'std': std, 'losses': val_losses}
+    info = {'mean': mean, 'std': std, 'losses': val_losses, 'mu_patch': mu_patch, 'top_k': top_k}
     if cand['use_lof']:
         lof = LocalOutlierFactor(novelty=True, contamination=cand['contamination'], n_jobs=-1)
         lof.fit(val_losses.reshape(-1, 1))
@@ -297,45 +318,40 @@ def _fit_calibrator(val_losses: np.ndarray, cand: dict) -> dict:
 
 
 def _ood_acc(metrics_summary: dict) -> float:
-    """Selection metric: mean OOD accuracy (vs_ood_real); fallback to vs_real accuracy."""
+    """Extract the selection metric from a metrics summary.
+    metrics_summary: output of eval_once.
+    Returns: mean OOD accuracy, or vs_real accuracy as fallback.
+    """
     if 'vs_ood_real' in metrics_summary:
         return metrics_summary['vs_ood_real'].get('mean_acc', 0.0)
     return metrics_summary.get('vs_real', {}).get('mean_acc', 0.0)
 
 
 def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
-    """
-    Evaluate every calibration candidate, pick the best by OOD accuracy,
-    persist results to run_dir, and return the winning threshold_info.
-
-    Runs:
-        1 val-set forward pass (to collect NLL scores for calibrator fitting)
-        N suppressed test-set passes (one per candidate, for metric collection)
-        1 final test-set pass with winner (full printed output)
+    """Try all calibration candidates, keep the best by OOD accuracy, persist it.
+    model: FastFlow model.
+    args: parsed CLI args.
+    config: backbone config dict.
+    class2idx: mapping class id -> name.
+    test_dataloader: clean test DataLoader shared across candidates.
+    Returns: winning threshold_info dict.
     """
     device = next(model.nf_flows[0].parameters()).device
 
-    # ── 1. Collect val NLL scores ─────────────────────────────────────────────
     print("\n" + "=" * 64)
     print("Recalibration sweep")
     print("=" * 64)
     print("Collecting val NLL scores...", flush=True)
     val_loader = build_val_data_loader(args, config)
-    model.eval()
-    val_bufs = []
-    for batch in val_loader:
-        data = batch[0] if isinstance(batch, (list, tuple)) else batch
-        with torch.no_grad():
-            val_bufs.append(score_per_image(model, data.to(device))["loss"].cpu())
-    val_losses = torch.cat(val_bufs).numpy()
+    top_k = getattr(args, 'top_k', None)
+    val_losses, mu_patch = _collect_val_scores(model, val_loader, top_k)
     print(f"  {len(val_losses)} real images — "
           f"mean={val_losses.mean():.4f}  std={val_losses.std():.4f}")
 
-    # ── 2. Evaluate each candidate (suppress verbose output) ─────────────────
     print("\nSweeping calibration candidates (clean test set)...")
     rows = []
     for cand in SWEEP_CANDIDATES:
-        thr = _fit_calibrator(val_losses, cand)
+        thr = _fit_calibrator(val_losses, cand, mu_patch=mu_patch, top_k=top_k)
         with _mute():
             _, _, _, metrics = eval_once(
                 test_dataloader, model,
@@ -345,7 +361,6 @@ def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
             )
         rows.append((cand, thr, metrics, _ood_acc(metrics)))
 
-    # ── 3. Comparison table ───────────────────────────────────────────────────
     print(f"\n{'─'*64}")
     print(f"  {'Candidate':<36} {'OOD Acc':>9} {'Real Acc':>9}")
     print(f"{'─'*64}")
@@ -354,20 +369,17 @@ def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
         print(f"  {cand['label']:<36} {ood_acc_val:>9.4f} {real_acc:>9.4f}")
     print(f"{'─'*64}")
 
-    # ── 4. Pick best: highest OOD acc; prefer threshold over LOF on tie ───────
     best_cand, best_thr, best_metrics, best_ood = max(
         rows, key=lambda x: (x[3], 0 if not x[0]['use_lof'] else -1)
     )
     print(f"\n  Winner: {best_cand['label']}  (OOD Acc = {best_ood:.4f})\n")
 
-    # ── 5. Full output for winner ─────────────────────────────────────────────
     print("=" * 64)
     print("Full evaluation — winner calibration")
     print("=" * 64)
     eval_once(test_dataloader, model, class2idx=class2idx,
               threshold_info=best_thr, wandb_log=False)
 
-    # ── 6. Persist winning calibration ───────────────────────────────────────
     _persist_calibration(best_thr, best_cand, best_metrics, args)
 
     return best_thr
@@ -375,23 +387,26 @@ def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
 
 def _persist_calibration(threshold_info: dict, cand: dict,
                          metrics_summary: dict, args) -> None:
-    """Overwrite thresholds.npz, lof_model.pkl, best_metrics.json, run_config.yaml."""
+    """Persist the winning calibration to the run folder.
+    threshold_info: winning calibration dict.
+    cand: winning candidate spec.
+    metrics_summary: metrics of the winner.
+    args: parsed CLI args (provides run_dir and file paths).
+    """
     run_dir = args.run_dir
 
-    # thresholds.npz
-    save_keys = ('l_threshold', 'u_threshold', 'threshold', 'losses', 'mean', 'std')
+    save_keys = ('l_threshold', 'u_threshold', 'threshold', 'losses', 'mean', 'std', 'mu_patch', 'top_k')
     np.savez(args.threshold_path,
-             **{k: threshold_info[k] for k in save_keys if k in threshold_info})
+             **{k: threshold_info[k] for k in save_keys
+                if k in threshold_info and threshold_info[k] is not None})
     print(f"\n  Saved thresholds     → {args.threshold_path}")
 
-    # lof_model.pkl — write if LOF won, remove if threshold won
     if 'lof' in threshold_info:
         joblib.dump(threshold_info['lof'], args.lof_checkpoint)
         print(f"  Saved LOF model      → {args.lof_checkpoint}")
     elif os.path.exists(args.lof_checkpoint):
         os.remove(args.lof_checkpoint)
 
-    # best_metrics.json — update metrics and record calibration method
     metrics_path = os.path.join(run_dir, 'best_metrics.json')
     if os.path.exists(metrics_path):
         with open(metrics_path) as f:
@@ -406,7 +421,6 @@ def _persist_calibration(threshold_info: dict, cand: dict,
             json.dump(payload, f, indent=2)
         print(f"  Updated best_metrics.json")
 
-    # run_config.yaml — update alpha / use_lof / contamination
     cfg_path = os.path.join(run_dir, 'run_config.yaml')
     if os.path.exists(cfg_path):
         with open(cfg_path) as f:
@@ -419,11 +433,10 @@ def _persist_calibration(threshold_info: dict, cand: dict,
         print(f"  Updated run_config.yaml")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Main evaluation entry
-# ═══════════════════════════════════════════════════════════════════════════
-
 def evaluate(args):
+    """Run evaluation for a training run (sweep, custom dirs, or standard).
+    args: parsed CLI args.
+    """
     config     = yaml.safe_load(open(args.config, "r"))
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
 
@@ -432,23 +445,22 @@ def evaluate(args):
     device = resolve_device(getattr(args, 'gpu_id', None))
     model.to(device)
 
-    # ── Recalibration sweep ───────────────────────────────────────────────────
     if args.recalibrate:
-        # Build the clean (no-attack) test dataloader once and share across candidates
         test_dataloader, class2idx = build_test_data_loader(args, config)
         _recalibrate_sweep(model, args, config, class2idx, test_dataloader)
         return
 
-    # ── Load saved threshold / LOF ────────────────────────────────────────────
     threshold_info = None
     if os.path.exists(args.threshold_path):
         if args.threshold_path.endswith('.npz'):
             loaded = np.load(args.threshold_path, allow_pickle=True)
             threshold_info = {k: loaded[k] for k in loaded.files}
-            for sk in ('threshold', 'l_threshold', 'u_threshold', 'mean', 'std'):
+            for sk in ('threshold', 'l_threshold', 'u_threshold', 'mean', 'std', 'mu_patch'):
                 if sk in threshold_info and isinstance(threshold_info[sk], np.ndarray):
                     if threshold_info[sk].size == 1:
                         threshold_info[sk] = float(threshold_info[sk])
+            if 'top_k' in threshold_info and isinstance(threshold_info['top_k'], np.ndarray):
+                threshold_info['top_k'] = int(threshold_info['top_k'])
         else:
             td = np.load(args.threshold_path, allow_pickle=True)
             threshold_info = td.item() if (isinstance(td, np.ndarray) and td.dtype == object) else {
@@ -457,6 +469,18 @@ def evaluate(args):
                 'u_threshold': float(td[0]) + 3 * float(td[1]),
             }
         print(f"Threshold loaded from {args.threshold_path}")
+
+        if getattr(args, '_top_k_override', False) and args.top_k != threshold_info.get('top_k'):
+            print(f"[eval] --top_k override ({threshold_info.get('top_k')} → {args.top_k}); "
+                  "recomputing threshold on validation set...")
+            val_dataloader = build_val_data_loader(args, config)
+            threshold_info = compute_threshold(
+                val_dataloader, model,
+                use_lof=bool(getattr(args, 'use_lof', False)),
+                contamination=getattr(args, 'contamination', 'auto'),
+                alpha=getattr(args, 'alpha', 0.1),
+                top_k=args.top_k,
+            )
     else:
         print("Computing threshold on validation set...")
         val_dataloader = build_val_data_loader(args, config)
@@ -465,20 +489,19 @@ def evaluate(args):
             use_lof=bool(getattr(args, 'use_lof', False)),
             contamination=getattr(args, 'contamination', 'auto'),
             alpha=getattr(args, 'alpha', 0.1),
+            top_k=getattr(args, 'top_k', None),
         )
 
     if getattr(args, 'use_lof', False) and os.path.exists(args.lof_checkpoint):
         threshold_info['lof'] = joblib.load(args.lof_checkpoint)
         print(f"Loaded LOF model from {args.lof_checkpoint}")
 
-    # ── Custom-dirs mode ──────────────────────────────────────────────────────
     if args.custom_dirs is not None:
         print(f"\n{'='*60}\nCustom dirs evaluation\n{'='*60}")
         custom_loader, groups = create_custom_dataloader(args, config)
         eval_custom(custom_loader, model, groups, threshold_info)
         return
 
-    # ── Standard eval with optional attacks ───────────────────────────────────
     attacks_configs = [
         ('none', {}),
         # ('jpeg', {'quality': 90}),

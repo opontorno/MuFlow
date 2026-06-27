@@ -10,23 +10,12 @@ from muflow import constants as const
 import numpy as np
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# Backbone factory (shared by FastFlow and feature-extraction scripts)
-# ════════════════════════════════════════════════════════════════════════════
-
 def build_backbone(model_name: str, config: dict, device=None):
-    """
-    Build and return a frozen backbone for feature extraction.
-
-    Used by generate_parameters.py and analyze_means.py (script-level
-    feature extraction) — separate from the FastFlow constructor so the
-    backbone-building logic lives in one place.
-
-    Returns:
-        backbone      : nn.Module (eval, frozen, on device)
-        backbone_type : str — 'cnn' | 'dino' | 'clip' | 'cait_deit'
-        out_indices   : list[int]
-        device        : torch.device
+    """Build a frozen backbone for feature extraction.
+    model_name: backbone identifier.
+    config: backbone config dict (uses 'out_indices', 'input_size', 'backbone_name').
+    device: torch device, or None to auto-select CUDA/CPU.
+    Returns: (backbone, backbone_type, out_indices, device).
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -50,7 +39,7 @@ def build_backbone(model_name: str, config: dict, device=None):
         backbone = CLIPVisualExtractor(model_name, out_block_indices=out_indices)
         backbone_type = "clip"
 
-    else:  # CNN (ResNet, WideResNet, DenseNet …)
+    else:
         backbone = timm.create_model(
             config.get("backbone_name", model_name),
             pretrained=True, features_only=True, in_chans=3, out_indices=out_indices
@@ -65,18 +54,11 @@ def build_backbone(model_name: str, config: dict, device=None):
 
 
 class CLIPVisualExtractor(nn.Module):
-    """
-    Wraps the official OpenAI CLIP ViT visual encoder and exposes intermediate
-    spatial feature maps at user-specified transformer block indices.
-
-    Inputs must already be normalised with CLIP stats — handled upstream by
-    make_patch_transform() when backbone_name is a CLIP variant.
-
-    Returns a list of (B, C, Hf, Wf) tensors, one per requested block.
-    Primary target: ViT-L/14 (hidden_dim=1024, patch_size=14, 24 blocks).
-    """
-
     def __init__(self, backbone_name: str, out_block_indices: list):
+        """
+        backbone_name: CLIP backbone identifier.
+        out_block_indices: transformer block indices whose feature maps to return.
+        """
         super().__init__()
         try:
             import clip as openai_clip
@@ -96,39 +78,47 @@ class CLIPVisualExtractor(nn.Module):
             param.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> list:
+        """Extract CLIP spatial feature maps.
+        x: (B, 3, H, W) tensor, already CLIP-normalized.
+        Returns: list of (B, C, Hf, Wf) tensors, one per requested block.
+        """
         v = self.visual
         B = x.shape[0]
 
-        # Patch embedding: (B, width, Hf, Wf)
         x = v.conv1(x)
         Hf, Wf = x.shape[2], x.shape[3]
-        x = x.reshape(B, x.shape[1], -1).permute(0, 2, 1)   # (B, N, C)
+        x = x.reshape(B, x.shape[1], -1).permute(0, 2, 1)
 
-        # CLS token + positional embedding
         cls = v.class_embedding.to(x.dtype).unsqueeze(0).unsqueeze(0).expand(B, -1, -1)
-        x   = torch.cat([cls, x], dim=1)                     # (B, N+1, C)
+        x   = torch.cat([cls, x], dim=1)
         x   = x + v.positional_embedding.to(x.dtype)
         x   = v.ln_pre(x)
-        x   = x.permute(1, 0, 2)                             # (N+1, B, C) — seq-first
+        x   = x.permute(1, 0, 2)
 
         features = []
         for i, block in enumerate(v.transformer.resblocks):
             x = block(x)
             if i in self.out_block_indices:
-                # Strip CLS token, reshape to spatial map
-                tokens = x[1:].permute(1, 2, 0)              # (B, C, N)
+                tokens = x[1:].permute(1, 2, 0)
                 feat   = tokens.reshape(B, self.hidden_dim, Hf, Wf)
                 features.append(feat)
         return features
 
 
 def gaussian_nll_loss(output, mu, cov, log_jac_det, pooling_type='mean'):
-    
+    """Gaussian negative log-likelihood of flow outputs under a GMM component.
+    output: (B, d) pooled flow output.
+    mu: GMM mean.
+    cov: GMM covariance.
+    log_jac_det: flow log-determinant of the Jacobian.
+    pooling_type: when 'flatten', applies log1p to the loss.
+    Returns: (loss, mahalanobis) tensors of shape (B,).
+    """
     B, d = output.shape
-    
+
     cov_inv = torch.linalg.inv(cov)
-    diff = (output - mu).reshape(B, d, 1) # Shape: (B, d, 1)  TODO: controllare shape output
-    mahalanobis = torch.matmul(diff.transpose(1, 2), torch.matmul(cov_inv, diff)).squeeze() # Mahalanobis distance: (x - mu)^T Σ^{-1} (x - mu)
+    diff = (output - mu).reshape(B, d, 1)
+    mahalanobis = torch.matmul(diff.transpose(1, 2), torch.matmul(cov_inv, diff)).squeeze()
 
     loss = 0.5 * mahalanobis - log_jac_det
     if pooling_type == 'flatten':
@@ -138,6 +128,11 @@ def gaussian_nll_loss(output, mu, cov, log_jac_det, pooling_type='mean'):
 
 
 def subnet_conv_func(kernel_size, hidden_ratio):
+    """Build a subnet constructor for FrEIA coupling blocks.
+    kernel_size: convolution kernel size.
+    hidden_ratio: hidden channels as a fraction of input channels.
+    Returns: a function (in_channels, out_channels) -> nn.Sequential.
+    """
     def subnet_conv(in_channels, out_channels):
         hidden_channels = int(in_channels * hidden_ratio)
         return nn.Sequential(
@@ -150,6 +145,14 @@ def subnet_conv_func(kernel_size, hidden_ratio):
 
 
 def nf_fast_flow(input_chw, conv3x3_only, hidden_ratio, flow_steps, clamp=2.0):
+    """Build a FastFlow normalizing-flow module for one feature scale.
+    input_chw: (C, H, W) of the input feature map.
+    conv3x3_only: use only 3x3 kernels if True, else alternate 1x1/3x3.
+    hidden_ratio: subnet hidden-channel ratio.
+    flow_steps: number of coupling steps.
+    clamp: affine clamping value.
+    Returns: FrEIA SequenceINN module.
+    """
     nodes = Ff.SequenceINN(*input_chw)
     for i in range(flow_steps):
         if i % 2 == 1 and not conv3x3_only:
@@ -179,20 +182,30 @@ class FastFlow(nn.Module):
         out_indices=[1, 2, 3],
         pooling_type='mean',
     ):
+        """
+        backbone_name: backbone identifier.
+        flow_steps: coupling steps per flow.
+        input_size: patch side.
+        backbone_weights: optional checkpoint for CNN backbone weights.
+        conv3x3_only: restrict flows to 3x3 kernels.
+        hidden_ratio: subnet hidden-channel ratio.
+        gmm_values: dict with the fitted GMM means/covariances per layer.
+        in_channels: input channels.
+        out_indices: backbone layer/block indices to extract.
+        pooling_type: spatial pooling applied to flow outputs.
+        """
         super(FastFlow, self).__init__()
         assert (
             backbone_name in const.SUPPORTED_BACKBONES
         ), "backbone_name must be one of {}".format(const.SUPPORTED_BACKBONES)
 
         if backbone_name in [const.BACKBONE_CAIT, const.BACKBONE_DEIT]:
-            # ── Legacy transformer backbones (DeiT / CaiT) ────────────────
             self.backbone_type     = 'cait_deit'
             self.feature_extractor = timm.create_model(backbone_name, pretrained=True, in_chans=in_channels)
             channels = [768]
             scales   = [16]
 
         elif backbone_name in const.DINO_BACKBONES:
-            # ── DINOv2 (timm) ──────────────────────────────────────────────
             if in_channels != 3:
                 print(f"[WARNING] DINOv2 only supports in_channels=3; ignoring in_channels={in_channels}")
             self.backbone_type  = 'dino'
@@ -200,7 +213,6 @@ class FastFlow(nn.Module):
             self.feature_extractor = timm.create_model(
                 timm_name, pretrained=True, img_size=input_size
             )
-            # out_indices are used as transformer block indices to extract
             self.dino_out_blocks = list(out_indices)
             ch      = const.DINO_CHANNELS[backbone_name]
             ps      = const.DINO_PATCH_SIZE[backbone_name]
@@ -209,11 +221,9 @@ class FastFlow(nn.Module):
             scales   = [ps] * num_out
 
         elif backbone_name in const.CLIP_BACKBONES:
-            # ── CLIP (official OpenAI CLIP) ────────────────────────────────
             if in_channels != 3:
                 print(f"[WARNING] CLIP only supports in_channels=3; ignoring in_channels={in_channels}")
             self.backbone_type     = 'clip'
-            # out_indices are used as transformer block indices to extract
             self.feature_extractor = CLIPVisualExtractor(
                 backbone_name, out_block_indices=list(out_indices)
             )
@@ -224,7 +234,6 @@ class FastFlow(nn.Module):
             scales   = [ps] * num_out
 
         else:
-            # ── CNN backbones (ResNet, WideResNet, DenseNet …) ─────────────
             self.backbone_type     = 'cnn'
             self.feature_extractor = timm.create_model(
                 backbone_name,
@@ -241,10 +250,6 @@ class FastFlow(nn.Module):
             channels = self.feature_extractor.feature_info.channels()
             scales   = self.feature_extractor.feature_info.reduction()
 
-        # ── Trainable LayerNorms (one per output scale) ────────────────────
-        # Applied after feature extraction for all backbone types.
-        # For cait_deit the norms are created but deliberately NOT used in
-        # forward() to preserve the pretrained ViT normalisation.
         self.norms = nn.ModuleList()
         for ch, sc in zip(channels, scales):
             self.norms.append(
@@ -275,15 +280,16 @@ class FastFlow(nn.Module):
         self.means = []
         self.covs = []
         translation_param = 0.0
-        
+
         for i in range(len(gmm_values)):
-            self.means.append(gmm_values[i][0] + translation_param) 
+            self.means.append(gmm_values[i][0] + translation_param)
             self.covs.append(gmm_values[i][1])
-        #self.covs = [np.expand_dims(np.eye(cov.shape[1]),axis=0) for cov in self.covs]
-    
+
     def process_features(self, features):
-        """Process features through normalizing flows."""
-        # ----- Normalizing Flows -----
+        """Run features through the flows and score them against the GMM.
+        features: list of (B, C, H, W) feature maps, one per layer.
+        Returns: dict with 'loss' and 'mahalanobis' tensors of shape (B,).
+        """
         loss = []
         mahalanobis = []
         for i, feature in enumerate(features):
@@ -308,7 +314,7 @@ class FastFlow(nn.Module):
             loss.append(loss_)
             mahalanobis.append(maha_)
 
-        mahalanobis_loss = torch.stack(loss, dim=1).mean(1)  # (B,)
+        mahalanobis_loss = torch.stack(loss, dim=1).mean(1)
 
         result = {
             "loss": mahalanobis_loss,
@@ -316,21 +322,10 @@ class FastFlow(nn.Module):
         }
         return result
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # Single-image predict()
-    # ═══════════════════════════════════════════════════════════════════════
-
     def predict(self, image) -> dict:
-        """
-        Single-image inference.
-
-        Args:
-            image : PIL.Image.Image or np.ndarray (H×W×3 uint8 RGB)
-
-        Returns:
-            dict with:
-                'loss'         (float) — anomaly score (higher = more likely fake)
-                'mahalanobis'  (float) — mean Mahalanobis distance across layers
+        """Single-image inference (mean NLL over deterministic patches).
+        image: PIL.Image or HxWx3 uint8 numpy array.
+        Returns: dict with 'loss' (anomaly score) and 'mahalanobis' floats.
         """
         from PIL import Image as _PIL
         from muflow.patch_utils import make_patch_transform, repr_patches
@@ -342,13 +337,11 @@ class FastFlow(nn.Module):
                 f"image must be PIL.Image or np.ndarray, got {type(image).__name__}"
             )
 
-        # ── Patch-centroid representation (same as dataset/eval pipeline) ──
         norm_mean, norm_std = const.get_norm_stats(self._backbone_name)
         transform = make_patch_transform(norm_mean, norm_std)
         plist = repr_patches(image, self.input_size, const.PATCH_NUM_REPR, const.PATCH_SEED)
-        patches = torch.stack([transform(p).float() for p in plist])   # (N, 3, P, P)
+        patches = torch.stack([transform(p).float() for p in plist])
 
-        # ── Forward pass (per patch) + aggregate (mean NLL over patches) ──
         device = next(self.nf_flows[0].parameters()).device
         patches = patches.to(device)
         self.eval()
@@ -361,19 +354,13 @@ class FastFlow(nn.Module):
         }
 
     def forward(self, x):
-        """
-        Forward pass.
-
-        Args:
-            x: Input tensor
-
-        Returns:
-            Dictionary with loss and mahalanobis distance
+        """Forward pass: backbone features → flows → GMM scoring.
+        x: (B, 3, P, P) patch tensor.
+        Returns: dict with 'loss' and 'mahalanobis' tensors of shape (B,).
         """
         self.feature_extractor.eval()
 
         if self.backbone_type == 'cait_deit':
-            # ── DeiT ──────────────────────────────────────────────────────
             if isinstance(self.feature_extractor, timm.models.vision_transformer.VisionTransformer):
                 x = self.feature_extractor.patch_embed(x)
                 cls_token = self.feature_extractor.cls_token.expand(x.shape[0], -1, -1)
@@ -389,7 +376,7 @@ class FastFlow(nn.Module):
                         dim=1,
                     )
                 x = self.feature_extractor.pos_drop(x + self.feature_extractor.pos_embed)
-                for i in range(8):  # paper Table 6. Block Index = 7
+                for i in range(8):
                     x = self.feature_extractor.blocks[i](x)
                 x = self.feature_extractor.norm(x)
                 x = x[:, 2:, :]
@@ -397,12 +384,11 @@ class FastFlow(nn.Module):
                 x = x.permute(0, 2, 1)
                 x = x.reshape(N, C, self.input_size // 16, self.input_size // 16)
                 features = [x]
-            # ── CaiT ──────────────────────────────────────────────────────
             else:
                 x = self.feature_extractor.patch_embed(x)
                 x = x + self.feature_extractor.pos_embed
                 x = self.feature_extractor.pos_drop(x)
-                for i in range(41):  # paper Table 6. Block Index = 40
+                for i in range(41):
                     x = self.feature_extractor.blocks[i](x)
                 N, _, C = x.shape
                 x = self.feature_extractor.norm(x)
@@ -411,21 +397,17 @@ class FastFlow(nn.Module):
                 features = [x]
 
         elif self.backbone_type == 'dino':
-            # ── DINOv2 — get_intermediate_layers returns (B, C, H, W) ────
             features = self.feature_extractor.get_intermediate_layers(
                 x, n=self.dino_out_blocks, reshape=True
             )
             features = [self.norms[i](f) for i, f in enumerate(features)]
 
         elif self.backbone_type == 'clip':
-            # ── CLIP — CLIPVisualExtractor handles renorm + spatial maps ─
             features = self.feature_extractor(x)
             features = [self.norms[i](f) for i, f in enumerate(features)]
 
         else:
-            # ── CNN (ResNet, etc.) ────────────────────────────────────────
             features = self.feature_extractor(x)
             features = [self.norms[i](feature) for i, feature in enumerate(features)]
-        
-        return self.process_features(features)
 
+        return self.process_features(features)

@@ -1,19 +1,10 @@
-"""
-GPU utilities for MuFlow.
-
-Auto-selection of the most suitable CUDA device.
-"""
 import torch
 import GPUtil
 
 
 def select_best_gpu():
-    """Automatically select the GPU with the most free memory.
-
-    Returns:
-        int  : id of the GPU with most free memory,
-        0    : fallback if CUDA is available but GPUtil finds nothing,
-        None : if no CUDA device is available (caller should use CPU).
+    """Return the id of the GPU with the most free memory.
+    Returns: int gpu id, 0 if none found by GPUtil, or None if no CUDA device.
     """
     if not torch.cuda.is_available():
         print("No CUDA GPUs available, using CPU")
@@ -29,10 +20,9 @@ def select_best_gpu():
 
 
 def resolve_device(gpu_id=None):
-    """Resolve a torch.device from an optional manual GPU id.
-
-    If gpu_id is None, auto-selects the GPU with most free memory.
-    Falls back to CPU when no GPU is available.
+    """Return a torch.device.
+    gpu_id: manual GPU id, or None to auto-select the freest GPU.
+    Returns: torch.device (CPU if no GPU is available).
     """
     if gpu_id is not None:
         print(f"📌 Using manually specified GPU {gpu_id}")
