@@ -521,6 +521,9 @@ def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx,
         'accuracy':          accuracy_score(y_true_binary, y_pred_balanced),
         'acc_oracle':        accuracy_score(y_true_binary, _preds_oracle),
         'acc_oracle_bi':     accuracy_score(y_true_binary, _preds_oracle_b),
+        'thr_oracle':        float(_thr[_best]),
+        'thr_oracle_bi':     float(_thr_b[_best_b]),
+        'mu_oracle_bi':      _mu_real,
         'ap':                average_precision_score(y_true_binary, scores_bilateral),
         'roc':               roc_auc_score(y_true_binary, scores_bilateral),
     }
@@ -651,11 +654,16 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
     acc_real = accuracy_score(np.zeros(len(y_true_0), dtype=np.int8), y_pred_0) \
                if len(y_true_0) > 0 else 0.0
 
+    if 'lof' in threshold_info:
+        deployed_thr_str = "thr=LOF"
+    else:
+        deployed_thr_str = f"thr=[{threshold_info['l_threshold']:.4f}, {threshold_info['u_threshold']:.4f}]"
+
     classes_to_process = [c for c in classes[1:] if c != 99]
 
-    print("\nComputing metrics using Real as baseline...")
+    print("\nComputing metrics using in-domain Real as baseline...")
     print("-" * 30)
-    print(f"  > Class Real      (N={len(y_true_0)}): \t Accuracy = {acc_real:.4f}, \t Loss = {preds_0.mean() if len(preds_0) > 0 else 0:.4f}±{preds_0.std() if len(preds_0) > 0 else 0:.4f}")
+    print(f"  > Class In-domain Real      : \t Accuracy = {acc_real:.4f} ({deployed_thr_str}), \t Loss = {preds_0.mean() if len(preds_0) > 0 else 0:.4f}±{preds_0.std() if len(preds_0) > 0 else 0:.4f}")
     print("=" * 30)
     metrics_real_start_time = time.time()
     results = Parallel(n_jobs=-1, backend='threading')(
@@ -668,7 +676,11 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
     for result in results:
         if result is None:
             continue
-        print(f"  > Class {result['class_name']} (N={result['min_len']*2}): \t Accuracy = {result['accuracy']:.4f} (oracle={result['acc_oracle']:.4f}, bi={result['acc_oracle_bi']:.4f}), \t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}, \t Loss = {result['loss_mean']:.4f}±{result['loss_std']:.4f}")
+        print(f"  > Class {result['class_name']} : \t Accuracy = {result['accuracy']:.4f} "
+              f"(oracle={result['acc_oracle']:.4f} @thr={result['thr_oracle']:.4f}, "
+              f"bi={result['acc_oracle_bi']:.4f} @[{result['mu_oracle_bi']-result['thr_oracle_bi']:.4f}, "
+              f"{result['mu_oracle_bi']+result['thr_oracle_bi']:.4f}]), "
+              f"\t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}, \t Loss = {result['loss_mean']:.4f}±{result['loss_std']:.4f}")
         print("-" * 30)
         per_class_metrics[f"loss_per_class/{result['class_name']}"]          = result['loss_mean']
         per_class_metrics[f"loss_std_per_class/{result['class_name']}"]      = result['loss_std']
@@ -705,7 +717,7 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
     if 99 in class_masks and len(preds_99) > 0:
         print("Computing metrics using OOD Real as baseline...")
         print("-" * 30)
-        print(f"  > Class {class_ood_real_name} (N={len(y_true_ood_real)}): \t Accuracy = {acc_ood_real:.4f}, \t Loss = {preds_99.mean():.4f}±{preds_99.std():.4f}")
+        print(f"  > Class {class_ood_real_name} : \t Accuracy = {acc_ood_real:.4f} ({deployed_thr_str}), \t Loss = {preds_99.mean():.4f}±{preds_99.std():.4f}")
         print("=" * 30)
         metrics_ood_start_time = time.time()
         results_ood = Parallel(n_jobs=-1, backend='threading')(
@@ -717,7 +729,11 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         for result in results_ood:
             if result is None:
                 continue
-            print(f"  > Class {result['class_name']} (N={result['min_len']*2}): \t Accuracy = {result['accuracy']:.4f} (oracle={result['acc_oracle']:.4f}, bi={result['acc_oracle_bi']:.4f}), \t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}")
+            print(f"  > Class {result['class_name']} : \t Accuracy = {result['accuracy']:.4f} "
+                  f"(oracle={result['acc_oracle']:.4f} @thr={result['thr_oracle']:.4f}, "
+                  f"bi={result['acc_oracle_bi']:.4f} @[{result['mu_oracle_bi']-result['thr_oracle_bi']:.4f}, "
+                  f"{result['mu_oracle_bi']+result['thr_oracle_bi']:.4f}]), "
+                  f"\t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}, \t Loss = {result['loss_mean']:.4f}±{result['loss_std']:.4f}")
             print("-" * 30)
             per_class_metrics[f"acc_per_class_ood/{result['class_name']}"]           = result['accuracy']
             per_class_metrics[f"acc_oracle_per_class_ood/{result['class_name']}"]    = result['acc_oracle']
@@ -781,7 +797,7 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         acc_oracle_bi_g = accuracy_score(yt_g, (_dist_g >= _thr_gb[_ogb]).astype(np.int8))
 
         print(f"\n{'=' * 30}")
-        print(f"Global — Real vs All Fake (N={min_n} each, {len(preds_fake)} fake tot.)")
+        print(f"Global — Real vs All Fake")
         print(f"  Acc={acc_g:.4f}  (oracle={acc_oracle_g:.4f}, bi={acc_oracle_bi_g:.4f})")
         print(f"  AP={ap_g:.4f}   ROC AUC={roc_g:.4f}")
         print(f"{'=' * 30}\n")
@@ -831,7 +847,7 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         }
 
     metrics_summary = {
-        'vs_real': {
+        'in_domain_real': {
             'mean_acc':           _r(mean_acc),
             'mean_acc_oracle':    _r(mean_acc_oracle),
             'mean_acc_oracle_bi': _r(mean_acc_oracle_bi),
@@ -911,8 +927,8 @@ def train(args, config, canonical_checkpoint_dir):
                 alpha=args.alpha,
                 top_k=args.top_k)
 
-            l_threshold_val = threshold_info['l_threshold']
-            u_threshold_val = threshold_info['u_threshold']
+            l_threshold_val = threshold_info.get('l_threshold')
+            u_threshold_val = threshold_info.get('u_threshold')
             val_mean = threshold_info.get('mean', None)
             val_std  = threshold_info.get('std', None)
 
@@ -920,8 +936,11 @@ def train(args, config, canonical_checkpoint_dir):
 
             log_dict = {
                 "Train Loss Mean": train_mean, "Train Loss Std": train_std,
-                "Lower Threshold": l_threshold_val, "Upper Threshold": u_threshold_val,
             }
+            if l_threshold_val is not None:
+                log_dict["Lower Threshold"] = l_threshold_val
+            if u_threshold_val is not None:
+                log_dict["Upper Threshold"] = u_threshold_val
             if val_mean is not None:
                 log_dict["Val Loss Mean"] = val_mean
             if val_std is not None:

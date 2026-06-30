@@ -320,11 +320,11 @@ def _fit_calibrator(val_losses: np.ndarray, cand: dict, mu_patch=None, top_k=Non
 def _ood_acc(metrics_summary: dict) -> float:
     """Extract the selection metric from a metrics summary.
     metrics_summary: output of eval_once.
-    Returns: mean OOD accuracy, or vs_real accuracy as fallback.
+    Returns: mean OOD accuracy, or in_domain_real accuracy as fallback.
     """
     if 'vs_ood_real' in metrics_summary:
         return metrics_summary['vs_ood_real'].get('mean_acc', 0.0)
-    return metrics_summary.get('vs_real', {}).get('mean_acc', 0.0)
+    return metrics_summary.get('in_domain_real', {}).get('mean_acc', 0.0)
 
 
 def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
@@ -365,7 +365,7 @@ def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
     print(f"  {'Candidate':<36} {'OOD Acc':>9} {'Real Acc':>9}")
     print(f"{'─'*64}")
     for cand, _, metrics, ood_acc_val in rows:
-        real_acc = metrics.get('vs_real', {}).get('mean_acc', 0.0)
+        real_acc = metrics.get('in_domain_real', {}).get('mean_acc', 0.0)
         print(f"  {cand['label']:<36} {ood_acc_val:>9.4f} {real_acc:>9.4f}")
     print(f"{'─'*64}")
 
