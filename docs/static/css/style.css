@@ -303,6 +303,99 @@ body::before {
   padding: 0 0.5rem;
 }
 
+/* ── Results: scrollable AUC panels ──────────────────────────── */
+.rt-hint {
+  display: block;
+  font-size: 0.82rem;
+  color: var(--blue);
+  margin-top: 0.4rem;
+}
+.results-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  justify-content: center;
+  margin-bottom: 1.2rem;
+}
+.rt-tab {
+  border: 1px solid #d8dde3;
+  background: #fff;
+  color: var(--text-soft);
+  padding: 0.45rem 0.95rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.rt-tab:hover { border-color: var(--blue); color: var(--blue); }
+.rt-tab.is-active { background: var(--blue); border-color: var(--blue); color: #fff; }
+
+.results-track {
+  display: flex;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  border-radius: var(--radius);
+}
+.results-track::-webkit-scrollbar { height: 6px; }
+.results-track::-webkit-scrollbar-thumb { background: #d8dde3; border-radius: 3px; }
+.results-panel {
+  min-width: 100%;
+  scroll-snap-align: start;
+  padding: 0 0.15rem;
+}
+
+.auc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+.auc-table th,
+.auc-table td {
+  padding: 0.5rem 0.45rem;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.auc-table thead th {
+  background: var(--blue);
+  color: #fff;
+  font-weight: 600;
+}
+.auc-table thead tr:first-child th { border-bottom: 1px solid rgba(255,255,255,0.28); }
+.auc-table thead tr:nth-child(2) th {   /* AUC / AP sub-row */
+  font-weight: 500;
+  font-size: 0.82rem;
+  opacity: 0.9;
+}
+.auc-table thead th.method-col {
+  font-size: 1.1rem;
+  vertical-align: middle;
+  border-top-left-radius: 8px;
+}
+.auc-table thead tr:first-child th:last-child { border-top-right-radius: 8px; }
+.auc-table td { border-bottom: 1px solid #eef0f3; }
+.auc-table td:first-child { text-align: left; color: var(--text); }
+/* vertical separators between family groups */
+.auc-table .grp { border-left: 1px solid #e3e7ec; }
+.auc-table thead .grp { border-left: 1px solid rgba(255,255,255,0.3); }
+.auc-table td.best   { font-weight: 700; color: var(--blue-dark); }
+.auc-table td.second { text-decoration: underline; }
+.auc-table .ours-row { background: var(--blue-light); font-weight: 600; }
+.auc-table .ours-row td:first-child { font-weight: 700; }
+.rt-venue {
+  display: inline-block;
+  margin-left: 0.35rem;
+  font-size: 0.7rem;
+  color: var(--text-soft);
+  background: #f0f2f5;
+  padding: 0.05rem 0.4rem;
+  border-radius: 4px;
+  vertical-align: middle;
+}
+
 /* ── Results ──────────────────────────────────────────────── */
 .results-intro {
   text-align: center;
@@ -557,4 +650,7 @@ body::before {
   .paper-figure { padding: 1rem; }
   .logos-row { flex-wrap: nowrap; gap: 1rem; }
   .logos-row img { max-width: none; height: 60px; }
+  .auc-table { font-size: 0.8rem; }
+  .auc-table th, .auc-table td { padding: 0.4rem 0.3rem; }
+  .rt-venue { display: none; }
 }

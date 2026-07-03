@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="µFlow: Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors">
   <meta property="og:title" content="µFlow — Deepfake Detection">
-  <meta property="og:description" content="One-class deepfake detector trained only on real images, leveraging average images and normalizing flows.">
+  <meta property="og:description" content="One-class deepfake detector trained only on real images, leveraging average images, normalizing flows.">
   <title>µFlow</title>
 
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
@@ -42,8 +42,8 @@
   <div class="container is-max-desktop has-text-centered">
 
     <p class="paper-venue">
-      <i class="fas fa-hourglass-half" style="margin-right:5px; font-size:0.75rem;"></i>
-      Under Review &mdash; ECCV 2026
+      <i class="fas fa-award" style="margin-right:5px; font-size:0.8rem;"></i>
+      ECCV 2026
     </p>
 
     <h1 class="paper-title">
@@ -168,21 +168,155 @@
       </strong> dataset.
     </p>
 
-    <div class="metrics-grid">
-      <div class="metric-card">
-        <p class="metric-value">94.7<span class="metric-unit">%</span></p>
-        <p class="metric-label">Accuracy</p>
-        <p class="metric-sub">Avg ood Accuracy across generators</p>
+    <p class="subsection-intro" style="margin-bottom:1.1rem;">
+      Out-of-distribution <strong>AUC</strong> and <strong>AP (%)</strong> vs the state of the art.
+      Competitors are trained on real + fakes; <strong>µFlow uses real images only</strong>.
+      Each panel omits the in-domain family (the one used for training).
+      <strong>Bold</strong> = best, <u>underline</u> = second.
+      <span class="rt-hint">Swipe / use the tabs to switch training regime →</span>
+    </p>
+
+    <div class="results-tabs">
+      <button class="rt-tab is-active" data-idx="0">Real + GANs</button>
+      <button class="rt-tab" data-idx="1">Real + DM-CS</button>
+      <button class="rt-tab" data-idx="2">Real + DM-OS</button>
+      <button class="rt-tab" data-idx="3">Real + Mix*</button>
+      <button class="rt-tab" data-idx="4">Real-only</button>
+    </div>
+
+    <div class="results-track">
+      <!-- ── Panel: Real + GANs (GANs in-domain → omitted) ──────────── -->
+      <div class="results-panel">
+        <table class="auc-table">
+          <thead>
+            <tr>
+              <th class="method-col" rowspan="2">Method</th>
+              <th class="grp" colspan="2">DM-CS</th>
+              <th class="grp" colspan="2">DM-OS</th>
+              <th class="grp" colspan="2">Average</th>
+            </tr>
+            <tr>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>DFX-SN <span class="rt-venue">MTA25</span></td><td class="grp">71.7</td><td>69.9</td><td class="grp">69.0</td><td>67.0</td><td class="grp">70.1</td><td>68.0</td></tr>
+            <tr><td>FreqNet <span class="rt-venue">AAAI24</span></td><td class="grp">75.5</td><td>74.1</td><td class="grp">73.2</td><td>74.2</td><td class="grp">74.3</td><td>75.4</td></tr>
+            <tr><td>NPR <span class="rt-venue">CVPR24</span></td><td class="grp">79.2</td><td>78.9</td><td class="grp">77.3</td><td>80.1</td><td class="grp">78.2</td><td>79.7</td></tr>
+            <tr><td>ODDN <span class="rt-venue">AAAI25</span></td><td class="grp second">83.2</td><td>84.8</td><td class="grp">82.9</td><td>85.3</td><td class="grp second">83.6</td><td>85.0</td></tr>
+            <tr><td>D³ <span class="rt-venue">CVPR25</span></td><td class="grp">82.0</td><td class="second">88.8</td><td class="grp second">83.1</td><td class="second">87.0</td><td class="grp">82.0</td><td class="second">87.9</td></tr>
+            <tr class="ours-row"><td>µFlow (Ours)</td><td class="grp best">96.8</td><td class="best">95.9</td><td class="grp best">96.8</td><td class="best">96.1</td><td class="grp best">96.8</td><td class="best">96.0</td></tr>
+          </tbody>
+        </table>
       </div>
-      <div class="metric-card">
-        <p class="metric-value">94.7<span class="metric-unit">%</span></p>
-        <p class="metric-label">AUC</p>
-        <p class="metric-sub">Avg ood AUC across generators</p>
+      <!-- ── Panel: Real + DM-CS (DM-CS in-domain → omitted) ────────── -->
+      <div class="results-panel">
+        <table class="auc-table">
+          <thead>
+            <tr>
+              <th class="method-col" rowspan="2">Method</th>
+              <th class="grp" colspan="2">GANs</th>
+              <th class="grp" colspan="2">DM-OS</th>
+              <th class="grp" colspan="2">Average</th>
+            </tr>
+            <tr>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>DFX-SN <span class="rt-venue">MTA25</span></td><td class="grp">67.0</td><td>66.1</td><td class="grp">84.6</td><td>86.0</td><td class="grp">75.8</td><td>76.0</td></tr>
+            <tr><td>FreqNet <span class="rt-venue">AAAI24</span></td><td class="grp">66.0</td><td>65.3</td><td class="grp">94.0</td><td>92.8</td><td class="grp">80.0</td><td>79.0</td></tr>
+            <tr><td>NPR <span class="rt-venue">CVPR24</span></td><td class="grp">68.5</td><td>69.1</td><td class="grp">93.4</td><td>92.7</td><td class="grp">81.0</td><td>80.9</td></tr>
+            <tr><td>ODDN <span class="rt-venue">AAAI25</span></td><td class="grp">79.2</td><td>75.9</td><td class="grp best">98.5</td><td>91.7</td><td class="grp">88.8</td><td>83.8</td></tr>
+            <tr><td>D³ <span class="rt-venue">CVPR25</span></td><td class="grp second">83.4</td><td class="second">85.0</td><td class="grp second">97.9</td><td class="best">99.9</td><td class="grp second">90.7</td><td class="second">92.5</td></tr>
+            <tr class="ours-row"><td>µFlow (Ours)</td><td class="grp best">90.4</td><td class="best">93.9</td><td class="grp">96.8</td><td class="second">96.1</td><td class="grp best">93.6</td><td class="best">95.0</td></tr>
+          </tbody>
+        </table>
       </div>
-      <div class="metric-card">
-        <p class="metric-value">95.3<span class="metric-unit">%</span></p>
-        <p class="metric-label">AP</p>
-        <p class="metric-sub">Avg ood AP across generators</p>
+      <!-- ── Panel: Real + DM-OS (DM-OS in-domain → omitted) ────────── -->
+      <div class="results-panel">
+        <table class="auc-table">
+          <thead>
+            <tr>
+              <th class="method-col" rowspan="2">Method</th>
+              <th class="grp" colspan="2">GANs</th>
+              <th class="grp" colspan="2">DM-CS</th>
+              <th class="grp" colspan="2">Average</th>
+            </tr>
+            <tr>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>DFX-SN <span class="rt-venue">MTA25</span></td><td class="grp">70.4</td><td>68.6</td><td class="grp">80.7</td><td>83.0</td><td class="grp">75.6</td><td>75.8</td></tr>
+            <tr><td>FreqNet <span class="rt-venue">AAAI24</span></td><td class="grp">67.6</td><td>70.7</td><td class="grp">94.7</td><td>94.4</td><td class="grp">81.2</td><td>82.6</td></tr>
+            <tr><td>NPR <span class="rt-venue">CVPR24</span></td><td class="grp">68.7</td><td>73.5</td><td class="grp">97.7</td><td class="best">98.0</td><td class="grp">83.2</td><td>85.8</td></tr>
+            <tr><td>ODDN <span class="rt-venue">AAAI25</span></td><td class="grp">71.2</td><td>70.3</td><td class="grp best">99.5</td><td>96.7</td><td class="grp">85.3</td><td>83.5</td></tr>
+            <tr><td>D³ <span class="rt-venue">CVPR25</span></td><td class="grp second">76.6</td><td class="second">77.9</td><td class="grp second">98.0</td><td class="second">97.1</td><td class="grp second">87.3</td><td class="second">87.5</td></tr>
+            <tr class="ours-row"><td>µFlow (Ours)</td><td class="grp best">90.4</td><td class="best">93.9</td><td class="grp">96.8</td><td>95.9</td><td class="grp best">93.6</td><td class="best">94.9</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <!-- ── Panel: Real + Mix* ─────────────────────────────────────── -->
+      <div class="results-panel">
+        <table class="auc-table">
+          <thead>
+            <tr>
+              <th class="method-col" rowspan="2">Method</th>
+              <th class="grp" colspan="2">GANs</th>
+              <th class="grp" colspan="2">DM-CS</th>
+              <th class="grp" colspan="2">DM-OS</th>
+              <th class="grp" colspan="2">Average</th>
+            </tr>
+            <tr>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>DFX-SN <span class="rt-venue">MTA25</span></td><td class="grp">77.9</td><td>77.1</td><td class="grp">80.4</td><td>82.2</td><td class="grp">81.9</td><td>82.0</td><td class="grp">80.1</td><td>80.4</td></tr>
+            <tr><td>FreqNet <span class="rt-venue">AAAI24</span></td><td class="grp">86.0</td><td>87.5</td><td class="grp">84.6</td><td>84.6</td><td class="grp">73.2</td><td>76.8</td><td class="grp">81.3</td><td>83.0</td></tr>
+            <tr><td>NPR <span class="rt-venue">CVPR24</span></td><td class="grp">89.8</td><td>89.5</td><td class="grp second">96.5</td><td>90.2</td><td class="grp">95.7</td><td>95.4</td><td class="grp">94.0</td><td>91.7</td></tr>
+            <tr><td>ODDN <span class="rt-venue">AAAI25</span></td><td class="grp second">91.5</td><td>93.5</td><td class="grp">83.3</td><td>86.5</td><td class="grp">86.3</td><td>85.6</td><td class="grp">87.0</td><td>88.5</td></tr>
+            <tr><td>D³ <span class="rt-venue">CVPR25</span></td><td class="grp best">92.5</td><td class="second">93.7</td><td class="grp">94.6</td><td class="second">92.6</td><td class="grp second">96.5</td><td class="best">96.4</td><td class="grp second">94.5</td><td class="second">94.2</td></tr>
+            <tr class="ours-row"><td>µFlow (Ours)</td><td class="grp">90.4</td><td class="best">93.9</td><td class="grp best">96.8</td><td class="best">95.9</td><td class="grp best">96.8</td><td class="second">96.1</td><td class="grp best">94.7</td><td class="best">95.3</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <!-- ── Panel: Real-only ───────────────────────────────────────── -->
+      <div class="results-panel">
+        <table class="auc-table">
+          <thead>
+            <tr>
+              <th class="method-col" rowspan="2">Method</th>
+              <th class="grp" colspan="2">GANs</th>
+              <th class="grp" colspan="2">DM-CS</th>
+              <th class="grp" colspan="2">DM-OS</th>
+              <th class="grp" colspan="2">Average</th>
+            </tr>
+            <tr>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+              <th class="grp">AUC</th><th>AP</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>PCL+I2G <span class="rt-venue">ICCV21</span></td><td class="grp">86.0</td><td>92.2</td><td class="grp">78.7</td><td>69.3</td><td class="grp">73.0</td><td>68.3</td><td class="grp">79.2</td><td>76.6</td></tr>
+            <tr><td>SBI <span class="rt-venue">CVPR22</span></td><td class="grp">86.8</td><td>93.0</td><td class="grp">79.4</td><td>69.7</td><td class="grp">73.2</td><td>68.5</td><td class="grp">79.8</td><td>77.1</td></tr>
+            <tr><td>AUNet <span class="rt-venue">CVPR23</span></td><td class="grp">87.0</td><td>93.3</td><td class="grp">80.0</td><td>70.2</td><td class="grp">73.5</td><td>70.1</td><td class="grp">80.2</td><td>77.9</td></tr>
+            <tr><td>LAA-Net <span class="rt-venue">CVPR24</span></td><td class="grp second">88.2</td><td class="best">94.2</td><td class="grp second">84.1</td><td class="second">81.0</td><td class="grp second">82.3</td><td class="second">83.3</td><td class="grp second">84.9</td><td class="second">86.2</td></tr>
+            <tr class="ours-row"><td>µFlow (Ours)</td><td class="grp best">90.4</td><td class="second">93.9</td><td class="grp best">96.8</td><td class="best">95.9</td><td class="grp best">96.8</td><td class="best">96.1</td><td class="grp best">94.7</td><td class="best">95.3</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
@@ -278,5 +412,29 @@
 </footer>
 
 <script src="static/js/index.js"></script>
+<script>
+  // Results: tab ↔ horizontal-scroll sync
+  (function () {
+    const track = document.querySelector('.results-track');
+    const tabs = Array.from(document.querySelectorAll('.rt-tab'));
+    const panels = Array.from(document.querySelectorAll('.results-panel'));
+    if (!track || !tabs.length) return;
+
+    tabs.forEach(tab => tab.addEventListener('click', () => {
+      const i = +tab.dataset.idx;
+      track.scrollTo({ left: i * track.clientWidth, behavior: 'smooth' });
+    }));
+
+    const io = new IntersectionObserver(entries => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          const i = panels.indexOf(e.target);
+          tabs.forEach((t, j) => t.classList.toggle('is-active', j === i));
+        }
+      });
+    }, { root: track, threshold: 0.6 });
+    panels.forEach(p => io.observe(p));
+  })();
+</script>
 </body>
 </html>

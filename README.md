@@ -1,56 +1,28 @@
-# µFlow — Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors
+<h1 align="center">µFlow — Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors</h1>
 
-> One-class deepfake **face** detector trained **only on real images** — no fake images, no
-> pseudo-deepfakes, no synthetic artifacts.
-> *Under review at ECCV 2026.*
+<p align="center">
+  <img src="https://img.shields.io/badge/ECCV-2026-1a73e8.svg" alt="ECCV 2026">
+  <img src="https://img.shields.io/badge/Python-3.12+-3776ab.svg" alt="Python 3.12+">
+  <a href="https://opontorno.github.io/MuFlow/"><img src="https://img.shields.io/badge/Project-Page-0ea5e9.svg" alt="Project Page"></a>
+</p>
 
-µFlow builds on a simple observation: **averaging many real images amplifies the consistent
-low-level traces** of a source, producing a feature space where real and fake samples are highly
-separable. We model the distribution of features extracted from *average* real images with a
-**Gaussian Mixture Model (GMM)**, and train a **normalizing flow (FastFlow)** to map the features
-of *single* real images into that discriminative distribution. At inference, real images land in
-high-likelihood regions while fakes fall in low-likelihood regions — the negative log-likelihood is
-used directly as an **anomaly (fakeness) score**.
-
-Because it never sees fake data during training, µFlow generalises strongly to **unseen
-generators** (GANs *and* diffusion models). It is trained on **FFHQ** reals and evaluated on
-**CelebA-HQ** reals plus **19 unseen generators** from the **WILD** dataset.
+<p align="center">
+  <b>One-class deepfake face detector trained only on real images.</b> &nbsp;·&nbsp; <b>Accepted at ECCV 2026.</b>
+</p>
 
 <p align="center">
   <img src="docs/static/images/visual_abs.png" width="85%" alt="µFlow visual abstract">
 </p>
 
----
+µFlow is a one-class deepfake detector trained **only on real images**. It models the distribution
+of features extracted from *average* real images with a **Gaussian Mixture Model (GMM)**, and trains
+a **normalizing flow (FastFlow)** to map the features of *single* real images into that
+distribution. At inference, the negative log-likelihood of an image is used directly as a fakeness
+score.
 
-## How it works
-
-The pipeline has three stages:
-
-1. **Discriminative Space Learning** — extract features from *average* real images and fit a GMM:
-   the target latent distribution `N(µ*, Σ*)`.
-2. **FastFlow Training** — train a normalizing flow on features of *single* real images,
-   maximising their likelihood under the GMM (minimising the Gaussian NLL).
-3. **Inference** — the NLL of a test image is its anomaly score. A threshold, calibrated on
-   held-out real images, separates real from fake.
-
-<p align="center">
-  <img src="docs/static/images/pipeline.png" width="95%" alt="µFlow pipeline overview">
-</p>
-<p align="center">
-  <em>(a) Discriminative space learning from average real images · (b) FastFlow training on single
-  real images · (c) likelihood-based inference.</em>
-</p>
-
-The core intuition: **averaging images amplifies generative traces**. Features of *single* images
-overlap across sources, but features of their *averages* form well-separated clusters — a far more
-discriminative space for deepfake detection.
-
-<p align="center">
-  <img src="docs/static/images/features.png" width="85%" alt="t-SNE: single vs averaged image features">
-</p>
-<p align="center">
-  <em>t-SNE of features from single images (left) vs averaged images (right).</em>
-</p>
+> This repository documents **how to train and test the model**. For the method description,
+> experiments and results, see the **[project page](https://opontorno.github.io/MuFlow/)**
+> (arXiv coming soon).
 
 ---
 
@@ -58,21 +30,20 @@ discriminative space for deepfake detection.
 
 ```
 MuFlow/
-├── main.py                     
-├── eval.py                     
-├── preds_analysis.py
-├── configs/
+├── main.py                     # training entry point
+├── eval.py                     # evaluation (incl. robustness attacks & custom dirs)
+├── configs/                    # one YAML per model config
+├── data/                       # split CSV is generated here (see Step 0)
 ├── scripts/
-│   ├── generate_means.py       
-│   ├── generate_parameters.py  
-│   ├── generate_csv.py         
-│   └── analyze_means.py        
-└── src/muflow/                 
-    ├── model.py                
-    ├── dataset.py              
-    ├── attacks.py              
-    ├── constants.py            
-    └── gpu_utils.py
+│   ├── generate_csv.py         # build the train/val/test split
+│   ├── generate_means.py       # compute average images
+│   └── generate_parameters.py  # fit the GMM
+└── src/muflow/
+    ├── model.py                # FastFlow model
+    ├── dataset.py              # data loading & transforms
+    ├── attacks.py              # content-preserving degradations (robustness)
+    ├── constants.py            # paths & normalisation stats (env-configurable)
+    └── gpu_utils.py            # automatic GPU selection
 ```
 
 ---
@@ -93,10 +64,6 @@ conda activate muflow
 pip install -e .
 ```
 
-This installs, among others, **FrEIA** (normalizing flows) and the official **OpenAI CLIP**
-package (`clip`), both from Git. If you only use CNN/DINOv2 backbones you do not need CLIP at
-runtime.
-
 ---
 
 ## Configuring paths
@@ -116,17 +83,16 @@ export MUFLOW_DATA_DIR=/path/to/your/data
 
 ### Expected data layout
 
-`$MUFLOW_DATA_DIR` should contain real and fake faces. The default configuration trains on FFHQ
-reals and evaluates on CelebA-HQ + WILD/DFX fakes:
-
 ```
 $MUFLOW_DATA_DIR/
-├── ffhq/<sub>/*.png                   # real (training source)
-├── celeba_hq/{train,val}/<sub>/*.jpg  # real (OOD real at test time)
-├── WILD/<set>/<generator>/*.png       # fake generators (test)
-├── datasets_DFX/<generator>/*.png     # additional fakes (test)
-├── dataset_split_rand.csv             # train/val/test split (see Step 0)
-└── means/<mean_size>/<source>/*.png   # average images (see Step 1)
+├── datasets/
+│   ├── ffhq/<sub>/*.png                        # real — training source
+│   ├── celeba_hq/{train,val}/<sub>/*.jpg       # real — OOD real at test time
+│   ├── WILD/{Closed_Set,Open_Set}/<gen>/*.png  # fake generators (test)
+│   └── datasets_DFX/<gen>/*.png                # additional fake generators (test)
+└── datasets_means/<mean_size>/<source>/*.png   # average images (see Step 1)
+
+MuFlow/data/dataset_split_rand.csv              # train/val/test split (see Step 0)
 ```
 
 You can point µFlow at **your own** datasets: any folder of real face images works as the training
@@ -135,30 +101,29 @@ source, and any folder of generators works as the test set — adjust the globs 
 
 ---
 
-## End-to-end usage
+## Training
 
 ### Step 0 — Build the split CSV
 
-The dataset uses a CSV (`$MUFLOW_DATA_DIR/dataset_split_rand.csv`) with columns `path,split`
-(`train`/`val`/`test`). Generate it once:
+The dataset is indexed by a CSV (`data/dataset_split_rand.csv`, columns `path,split`). The script
+auto-discovers every WILD generator (`Closed_Set` + `Open_Set`) and the DFX generators, caps each
+fake generator to 1000 images and produces a per-class 70/15/15 split:
 
 ```bash
 python scripts/generate_csv.py
 ```
 
-### Step 1 — Compute average images (of your real dataset)
+### Step 1 — Compute average images
 
-µFlow's discriminative space is built from **average images**. For training you only need the
-averages of your **real** dataset. Edit `INPUT_GLOB` at the top of
+For training you only need the averages of your **real** dataset. Edit `INPUT_GLOB` at the top of
 `scripts/generate_means.py`, then run:
 
 ```bash
-# e.g. INPUT_GLOB = "/path/to/ffhq/**/*.png"
+# e.g. INPUT_GLOB = "$MUFLOW_DATA_DIR/datasets/ffhq/**/*.png"
 python scripts/generate_means.py --name ffhq --mean-size 500 --num-images 1000
 ```
 
-This writes `…/means/500/ffhq/*.png` (each image is the average of 500 random reals). Run it once
-per source you want to include (it works for any image set, not just reals).
+This writes `datasets_means/500/ffhq/*.png` (each image is the average of 500 random reals).
 
 ### Step 2 — Fit the GMM
 
@@ -166,14 +131,12 @@ per source you want to include (it works for any image set, not just reals).
 python scripts/generate_parameters.py --model_name resnet50 --reals ffhq
 ```
 
-This reads the average images, extracts backbone features and saves the GMM parameters under
-`parameters/`. **You can skip this step**: `main.py` runs it automatically if the parameters file
-is missing.
+**You can skip this step**: `main.py` runs it automatically if the parameters file is missing.
 
 ### Step 3 — Train
 
 ```bash
-python main.py --config configs/resnet50.yaml
+python main.py --config configs/resnet50.yaml --reals ffhq
 ```
 
 The real/fake sources are configured in `src/muflow/constants.py` via `PATH_REAL`
@@ -184,7 +147,9 @@ Useful flags:
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--config` | backbone YAML | `configs/resnet50.yaml` |
+| `--config` | model config YAML (pick one from `configs/`) | `configs/resnet50.yaml` |
+| `--reals` | training real source (`ffhq`, `celeba_hq`, `ffhq+celeba_hq`) | `ffhq` |
+| `--use_augs` | enable train-time `RandomAffine` (translate + scale, no rotation) | off |
 | `--batch_size`, `--lr`, `--num_epochs` | optimisation | `32`, `1e-4`, `1000` |
 | `--alpha` | target false-positive rate for the threshold | `0.1` |
 | `--gpu_id` | force a GPU (default: auto-select the freest) | auto |
@@ -192,14 +157,16 @@ Useful flags:
 | `--wandb_entity`, `--wandb_project` | W&B destination | your default / `MuFlow` |
 
 Each run writes a checkpoint (`best.pt`), the calibrated thresholds, predictions and a metrics
-JSON to `$MUFLOW_CHECKPOINT_DIR/<run_name>/`. The best run is promoted to a canonical folder.
+JSON to `$MUFLOW_CHECKPOINT_DIR/<run_name>/`.
 
 > Tip: pass `--wandb disabled` to run without Weights & Biases.
 
-### Step 4 — Evaluate
+---
+
+## Testing
 
 ```bash
-python eval.py --run_dir logs/<canonical_run_name>
+python eval.py --run_dir logs/<run_name>
 ```
 
 All settings are loaded from the run's `run_config.yaml`. You can also evaluate on custom folders:
@@ -212,50 +179,11 @@ python eval.py --run_dir logs/<run> \
 Robustness to degradations (JPEG, blur, Gaussian/salt-&-pepper noise, resize, flip, …) can be
 toggled in the `attacks_configs` list inside `eval.py`.
 
-### Step 5 (optional) — Feature analysis
-
-Reproduce the paper's t-SNE analysis (single-image features vs their averages, side by side, per
-layer). Edit `SINGLE_IMAGE_GLOBS` at the top of `scripts/analyze_means.py`, then:
-
-```bash
-python scripts/analyze_means.py --model_name resnet50 --means-dir $MUFLOW_DATA_DIR/means/500
-```
-
-Plots are saved to `scripts/.pictures/`.
-
----
-
-## Backbones
-
-Select a backbone via its config in `configs/`. Supported families:
-
-- **CNN** (ImageNet): `resnet18/50/101`, `wide_resnet50_2`, `densenet121`
-- **ViT** (ImageNet): `deit`, `cait`
-- **DINOv2**: `dinov2_vits14/vitb14/vitl14`
-- **CLIP** (OpenAI): `clip_vitb32`, `clip_vitb16`, `clip_vitl14`
-
-Input normalisation is handled automatically per backbone (`constants.get_norm_stats`): CLIP uses
-CLIP statistics, everything else uses ImageNet statistics — and the **exact same** normalisation is
-applied during GMM fitting, training, evaluation and analysis.
-
----
-
-## Results
-
-In a fully **out-of-distribution** setting (trained on FFHQ reals only; tested on unseen CelebA-HQ
-reals and **19 unseen generators** from WILD), µFlow reaches, on average:
-
-| Metric | Clean | Under degradations |
-|--------|:-----:|:------------------:|
-| Accuracy | **96.8%** | 90.9% |
-| AUC | **96.1%** | 91.5% |
-| Avg. Precision | **96.8%** | 90.4% |
-
-See the paper for full per-generator and robustness tables.
-
 ---
 
 ## Citation
+
+If you find this work useful, please consider citing:
 
 ```bibtex
 @inproceedings{pontorno2026muflow,
@@ -264,11 +192,22 @@ See the paper for full per-generator and robustness tables.
   author    = {Pontorno, Orazio and Litrico, Mattia and
                Guarnera, Luca and Giuffrida, Valerio and
                Battiato, Sebastiano},
-  booktitle = {Under Review at ECCV 2026},
+  booktitle = {Proceedings of the European Conference on Computer Vision (ECCV)},
   year      = {2026},
 }
 ```
 
+---
+
+## Contact
+
+**Orazio Pontorno** — University of Catania — [orazio.pontorno@phd.unict.it](mailto:orazio.pontorno@phd.unict.it)
+
+For questions, issues or reproducibility requests, please open a
+[GitHub issue](https://github.com/opontorno/MuFlow/issues).
+
+---
+
 ## License
 
-Released under the terms in [LICENSE](LICENSE).
+See [LICENSE](LICENSE).
