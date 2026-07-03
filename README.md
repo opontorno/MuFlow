@@ -39,10 +39,11 @@ MuFlow/
 │   ├── generate_means.py       # compute average images
 │   └── generate_parameters.py  # fit the GMM
 └── src/muflow/
-    ├── model.py                # FastFlow model
+    ├── model.py                # FastFlow model & backbone builder
     ├── dataset.py              # data loading & transforms
+    ├── patch_utils.py          # native-patch sampling & feature extraction
     ├── attacks.py              # content-preserving degradations (robustness)
-    ├── constants.py            # paths & normalisation stats (env-configurable)
+    ├── constants.py            # paths, dataset globs & normalisation stats
     └── gpu_utils.py            # automatic GPU selection
 ```
 
@@ -136,7 +137,7 @@ python scripts/generate_parameters.py --model_name resnet50 --reals ffhq
 ### Step 3 — Train
 
 ```bash
-python main.py --config configs/resnet50.yaml --reals ffhq
+python main.py --config configs/resnet50.yaml
 ```
 
 The real/fake sources are configured in `src/muflow/constants.py` via `PATH_REAL`
@@ -148,8 +149,8 @@ Useful flags:
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--config` | model config YAML (pick one from `configs/`) | `configs/resnet50.yaml` |
-| `--reals` | training real source (`ffhq`, `celeba_hq`, `ffhq+celeba_hq`) | `ffhq` |
-| `--use_augs` | enable train-time `RandomAffine` (translate + scale, no rotation) | off |
+| `--top_k` | signed-mean over the `top_k` most deviant patches (`None`/`0` = all) | `None` |
+| `--use_lof` | calibrate with Local Outlier Factor instead of a threshold band | off |
 | `--batch_size`, `--lr`, `--num_epochs` | optimisation | `32`, `1e-4`, `1000` |
 | `--alpha` | target false-positive rate for the threshold | `0.1` |
 | `--gpu_id` | force a GPU (default: auto-select the freest) | auto |
