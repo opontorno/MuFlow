@@ -173,15 +173,18 @@ is missing.
 ### Step 3 — Train
 
 ```bash
-python main.py --config configs/resnet50.yaml --data WILD --reals ffhq
+python main.py --config configs/resnet50.yaml
 ```
+
+The real/fake sources are configured in `src/muflow/constants.py` via `PATH_REAL`
+(train/val + calibration), `PATH_REAL_OOD` (real used at test time; falls back to
+`PATH_REAL` when `None`) and `PATH_FAKE` (list of fake globs).
 
 Useful flags:
 
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--config` | backbone YAML | `configs/resnet50.yaml` |
-| `--reals` | training real source (`ffhq`, `celeba_hq`, `ffhq+celeba_hq`) | `ffhq` |
 | `--batch_size`, `--lr`, `--num_epochs` | optimisation | `32`, `1e-4`, `1000` |
 | `--alpha` | target false-positive rate for the threshold | `0.1` |
 | `--gpu_id` | force a GPU (default: auto-select the freest) | auto |

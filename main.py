@@ -86,7 +86,6 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default='configs/resnet50.yaml', help="path to config file")
 
-    parser.add_argument("--reals", type=str, default='ffhq', help="reals dataset", choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'])
     parser.add_argument("--checkpoint", type=str, help="path to load checkpoint")
 
     parser.add_argument('--wandb', default='online', choices=['online', 'offline', 'disabled'])
@@ -197,8 +196,15 @@ def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last
     Returns: DataLoader, or (DataLoader, idx2class) if return_class2idx.
     """
     norm_mean, norm_std = const.get_norm_stats(config["backbone_name"])
+    if is_train:
+        real_paths = const.PATH_REAL
+        fake_paths = []
+    else:
+        real_paths = const.PATH_REAL_OOD if const.PATH_REAL_OOD else const.PATH_REAL
+        fake_paths = const.PATH_FAKE
     dataset_instance = dataset.Dataset(
-        reals_name=args.reals,
+        real_paths=real_paths,
+        fake_paths=fake_paths,
         input_size=config["input_size"],
         is_train=is_train,
         is_val=is_val,
@@ -263,7 +269,8 @@ def build_model(config, args):
     pooling_type = config.get("pooling_type", "mean")
     n_components = config.get("gmm_n_components", 1)
 
-    gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{args.reals}_{config['input_size']}_{pooling_type}.npy"
+    reals_tag = const.real_tag(const.PATH_REAL)
+    gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{reals_tag}_{config['input_size']}_{pooling_type}.npy"
 
     if not os.path.exists(gmm_parameters):
         print(f"GMM parameters not found at {gmm_parameters}.")
@@ -276,7 +283,7 @@ def build_model(config, args):
             sys.executable,
             gen_script,
             "--model_name", config["backbone_name"],
-            "--reals", args.reals,
+            "--reals", reals_tag,
         ]
         subprocess.run(cmd, check=True)
         if not os.path.exists(gmm_parameters):
@@ -539,7 +546,7 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
     threshold_info: calibration dict from compute_threshold.
     wandb_log: log metrics to Weights & Biases.
     wandb_prefix: prefix prepended to W&B keys.
-    Returns: (mean_roc_ood, per-image scores, labels, metrics_summary).
+    Returns: (mean_roc, per-image scores, labels, metrics_summary).
     """
     inference_start_time = time.time()
     model.eval()
@@ -586,19 +593,16 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
 
     mask_fake = np.zeros(len(labels), dtype=bool)
     for c in classes:
-        if c != 0 and c != 99:
+        if c != 0:
             mask_fake |= class_masks[c]
 
     if epoch is not None and epoch % 50 == 0 and not wandb_prefix:
         likelihood_real = preds_[class_masks[0]]
-        likelihood_ood_real = preds_[class_masks.get(99, np.zeros(len(labels), dtype=bool))]
         likelihood_fake = preds_[mask_fake]
 
         plt.figure(figsize=(10, 6))
         if len(likelihood_real) > 0:
             sns.kdeplot(likelihood_real, label='Real', color='blue')
-        if len(likelihood_ood_real) > 0:
-            sns.kdeplot(likelihood_ood_real, label='OOD Real', color='green')
         if len(likelihood_fake) > 0:
             sns.kdeplot(likelihood_fake, label='Fake', color='orange')
         plt.title('Real vs Fake')
@@ -630,27 +634,6 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         per_class_metrics["loss_per_class/Real"]     = loss_mean_real
         per_class_metrics["loss_std_per_class/Real"] = loss_std_real
 
-    preds_99         = np.array([])
-    y_pred_ood_real  = np.array([], dtype=int)
-    y_true_ood_real  = np.array([])
-    mean_roc_ood     = 0.0
-    acc_ood_real     = 0.0
-    class_ood_real_name = "OOD_Real"
-
-    if 99 in class_masks:
-        class_ood_real_name = class2idx[99] if class2idx else "OOD_Real"
-        mask_99         = class_masks[99]
-        y_true_ood_real = labels[mask_99]
-        y_pred_ood_real = preds[mask_99]
-        preds_99        = preds_[mask_99]
-
-        if len(preds_99) > 0:
-            per_class_metrics[f"loss_per_class/{class_ood_real_name}"]     = float(preds_99.mean())
-            per_class_metrics[f"loss_std_per_class/{class_ood_real_name}"] = float(preds_99.std())
-            acc_ood_real = accuracy_score(
-                np.zeros(len(y_true_ood_real), dtype=np.int8), y_pred_ood_real)
-            per_class_metrics[f"acc_per_class/{class_ood_real_name}"] = acc_ood_real
-
     acc_real = accuracy_score(np.zeros(len(y_true_0), dtype=np.int8), y_pred_0) \
                if len(y_true_0) > 0 else 0.0
 
@@ -659,12 +642,13 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
     else:
         deployed_thr_str = f"thr=[{threshold_info['l_threshold']:.4f}, {threshold_info['u_threshold']:.4f}]"
 
-    classes_to_process = [c for c in classes[1:] if c != 99]
+    classes_to_process = list(classes[1:])
 
-    print("\nComputing metrics using in-domain Real as baseline...")
-    print("-" * 30)
-    print(f"  > Class In-domain Real      : \t Accuracy = {acc_real:.4f} ({deployed_thr_str}), \t Loss = {preds_0.mean() if len(preds_0) > 0 else 0:.4f}±{preds_0.std() if len(preds_0) > 0 else 0:.4f}")
-    print("=" * 30)
+    if const.SHOW_PER_CLASS:
+        print("\nComputing metrics using Real as baseline...")
+        print("-" * 30)
+        print(f"  > Class Real      : \t Accuracy = {acc_real:.4f} ({deployed_thr_str}), \t Loss = {preds_0.mean() if len(preds_0) > 0 else 0:.4f}±{preds_0.std() if len(preds_0) > 0 else 0:.4f}")
+        print("=" * 30)
     metrics_real_start_time = time.time()
     results = Parallel(n_jobs=-1, backend='threading')(
         delayed(_compute_class_metrics)(
@@ -676,12 +660,13 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
     for result in results:
         if result is None:
             continue
-        print(f"  > Class {result['class_name']} : \t Accuracy = {result['accuracy']:.4f} "
-              f"(oracle={result['acc_oracle']:.4f} @thr={result['thr_oracle']:.4f}, "
-              f"bi={result['acc_oracle_bi']:.4f} @[{result['mu_oracle_bi']-result['thr_oracle_bi']:.4f}, "
-              f"{result['mu_oracle_bi']+result['thr_oracle_bi']:.4f}]), "
-              f"\t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}, \t Loss = {result['loss_mean']:.4f}±{result['loss_std']:.4f}")
-        print("-" * 30)
+        if const.SHOW_PER_CLASS:
+            print(f"  > Class {result['class_name']} : \t Accuracy = {result['accuracy']:.4f} "
+                  f"(oracle={result['acc_oracle']:.4f} @thr={result['thr_oracle']:.4f}, "
+                  f"bi={result['acc_oracle_bi']:.4f} @[{result['mu_oracle_bi']-result['thr_oracle_bi']:.4f}, "
+                  f"{result['mu_oracle_bi']+result['thr_oracle_bi']:.4f}]), "
+                  f"\t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}, \t Loss = {result['loss_mean']:.4f}±{result['loss_std']:.4f}")
+            print("-" * 30)
         per_class_metrics[f"loss_per_class/{result['class_name']}"]          = result['loss_mean']
         per_class_metrics[f"loss_std_per_class/{result['class_name']}"]      = result['loss_std']
         per_class_metrics[f"acc_per_class/{result['class_name']}"]           = result['accuracy']
@@ -703,63 +688,17 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
     mean_roc           = np.mean(rocs)
 
     metrics_real_time = time.time() - metrics_real_start_time
-    print("-" * 30)
-    _print_family_summary(_aggregate_by_family(results))
-    if epoch is not None:
+    if const.SHOW_FAMILIES:
+        print("-" * 30)
+        _print_family_summary(_aggregate_by_family(results))
+    if const.SHOW_PER_CLASS and epoch is not None:
         print(f"⏱️  Metrics computation time (Real baseline): {int(metrics_real_time // 60)}m {int(metrics_real_time % 60)}s")
-    print("=" * 30 + "\n")
-
-    aps_ood, accs_ood, rocs_ood = [], [], []
-    mean_acc_ood = mean_ap_ood = mean_roc_ood = 0.0
-    mean_acc_oracle_bi_ood = 0.0
-    accs_oracle_ood = []
-
-    if 99 in class_masks and len(preds_99) > 0:
-        print("Computing metrics using OOD Real as baseline...")
-        print("-" * 30)
-        print(f"  > Class {class_ood_real_name} : \t Accuracy = {acc_ood_real:.4f} ({deployed_thr_str}), \t Loss = {preds_99.mean():.4f}±{preds_99.std():.4f}")
-        print("=" * 30)
-        metrics_ood_start_time = time.time()
-        results_ood = Parallel(n_jobs=-1, backend='threading')(
-            delayed(_compute_class_metrics)(
-                c, class_masks, labels, preds, preds_, class2idx, y_true_ood_real, y_pred_ood_real, preds_99, mu_val
-            ) for c in classes_to_process
-        )
-        accs_oracle_ood, accs_oracle_bi_ood = [], []
-        for result in results_ood:
-            if result is None:
-                continue
-            print(f"  > Class {result['class_name']} : \t Accuracy = {result['accuracy']:.4f} "
-                  f"(oracle={result['acc_oracle']:.4f} @thr={result['thr_oracle']:.4f}, "
-                  f"bi={result['acc_oracle_bi']:.4f} @[{result['mu_oracle_bi']-result['thr_oracle_bi']:.4f}, "
-                  f"{result['mu_oracle_bi']+result['thr_oracle_bi']:.4f}]), "
-                  f"\t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}, \t Loss = {result['loss_mean']:.4f}±{result['loss_std']:.4f}")
-            print("-" * 30)
-            per_class_metrics[f"acc_per_class_ood/{result['class_name']}"]           = result['accuracy']
-            per_class_metrics[f"acc_oracle_per_class_ood/{result['class_name']}"]    = result['acc_oracle']
-            per_class_metrics[f"acc_oracle_bi_per_class_ood/{result['class_name']}"] = result['acc_oracle_bi']
-            per_class_metrics[f"ap_per_class_ood/{result['class_name']}"]            = result['ap']
-            per_class_metrics[f"roc_per_class_ood/{result['class_name']}"]           = result['roc']
-            aps_ood.append(result['ap'])
-            accs_ood.append(result['accuracy'])
-            accs_oracle_ood.append(result['acc_oracle'])
-            accs_oracle_bi_ood.append(result['acc_oracle_bi'])
-            rocs_ood.append(result['roc'])
-
-        mean_acc_ood = np.mean(accs_ood) if len(accs_ood) > 0 else 0.0
-        mean_ap_ood  = np.mean(aps_ood)  if len(aps_ood)  > 0 else 0.0
-        mean_roc_ood = np.mean(rocs_ood) if len(rocs_ood) > 0 else 0.0
-
-        metrics_ood_time = time.time() - metrics_ood_start_time
-        print("-" * 30)
-        _print_family_summary(_aggregate_by_family(results_ood))
-        if epoch is not None:
-            print(f"⏱️  Metrics computation time (OOD Real baseline): {int(metrics_ood_time // 60)}m {int(metrics_ood_time % 60)}s")
+    if const.SHOW_PER_CLASS or const.SHOW_FAMILIES:
         print("=" * 30 + "\n")
 
-        per_class_metrics["Val acc OOD"] = mean_acc_ood
-        per_class_metrics["Val AP OOD"] = mean_ap_ood
-        per_class_metrics["Val ROC OOD"] = mean_roc_ood
+    per_class_metrics["Val acc"] = mean_acc
+    per_class_metrics["Val AP"]  = mean_ap
+    per_class_metrics["Val ROC"] = mean_roc
 
     test_loss_real_mean = loss_mean_real
     test_loss_real_std  = loss_std_real
@@ -847,7 +786,7 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         }
 
     metrics_summary = {
-        'in_domain_real': {
+        'real': {
             'mean_acc':           _r(mean_acc),
             'mean_acc_oracle':    _r(mean_acc_oracle),
             'mean_acc_oracle_bi': _r(mean_acc_oracle_bi),
@@ -856,19 +795,10 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
             'per_class':          _per_class_dict(results),
         },
     }
-    if 99 in class_masks and len(preds_99) > 0:
-        metrics_summary['vs_ood_real'] = {
-            'mean_acc':           _r(mean_acc_ood),
-            'mean_acc_oracle':    _r(np.mean(accs_oracle_ood) if accs_oracle_ood else 0),
-            'mean_acc_oracle_bi': _r(mean_acc_oracle_bi_ood),
-            'mean_ap':            _r(mean_ap_ood),
-            'mean_roc':           _r(mean_roc_ood),
-            'per_class':          _per_class_dict(results_ood),
-        }
     if global_metrics:
         metrics_summary['global'] = global_metrics
 
-    return mean_roc_ood, preds_, labels, metrics_summary
+    return mean_roc, preds_, labels, metrics_summary
 
 
 def train(args, config, canonical_checkpoint_dir):
@@ -955,8 +885,8 @@ def train(args, config, canonical_checkpoint_dir):
                 best_metric = current_metric
                 patience_counter = 0
 
-                print(f"Epoch {epoch+1}: New best ROC OOD: {best_metric:.4f}. Saving model.")
-                wandb.run.summary["best_roc_ood"] = best_metric
+                print(f"Epoch {epoch+1}: New best ROC: {best_metric:.4f}. Saving model.")
+                wandb.run.summary["best_roc"] = best_metric
 
                 checkpoint_path = os.path.join(checkpoint_dir, "best.pt")
                 torch.save({
@@ -996,13 +926,13 @@ def train(args, config, canonical_checkpoint_dir):
 
             else:
                 patience_counter += 1
-                print(f"Epoch {epoch+1}: ROC OOD ({current_metric:.4f}) not improved compared to {best_metric:.4f}. Patience: {patience_counter}/{args.early_stopping_patience}")
+                print(f"Epoch {epoch+1}: ROC ({current_metric:.4f}) not improved compared to {best_metric:.4f}. Patience: {patience_counter}/{args.early_stopping_patience}")
 
         if patience_counter >= args.early_stopping_patience:
-            print(f"Stopping early at epoch {epoch + 1} after {args.early_stopping_patience} epochs without improvement of ROC OOD.")
+            print(f"Stopping early at epoch {epoch + 1} after {args.early_stopping_patience} epochs without improvement of ROC.")
             break
 
-    print(f"Training finished. Best ROC OOD: {best_metric:.4f}")
+    print(f"Training finished. Best ROC: {best_metric:.4f}")
 
     canonical_best_metric = _load_canonical_metric(canonical_checkpoint_dir)
     print(f"[champion] This run: {best_metric:.4f}  |  Canonical: {canonical_best_metric:.4f}")
@@ -1021,7 +951,7 @@ if __name__ == "__main__":
     pprint(vars(args))
     pprint(config)
 
-    canonical_run_name = f"{config['backbone_name']}_{args.reals}_{config['pooling_type']}"
+    canonical_run_name = f"{config['backbone_name']}_{const.real_tag(const.PATH_REAL)}_{config['pooling_type']}"
     if args.use_lof:
         canonical_run_name += "_lof"
     else:

@@ -58,7 +58,7 @@ def parse_args():
                              "recomputes the validation threshold to stay consistent. None/0 = all patches.")
     parser.add_argument("--recalibrate", action="store_true", default=False,
                         help="Run a full calibration sweep (threshold α∈{0.01,0.05,0.10} + LOF) "
-                             "on the val set, pick the best by OOD accuracy, and overwrite the "
+                             "on the val set, pick the best by real-baseline accuracy, and overwrite the "
                              "saved calibration in run_dir. Always uses the clean test set.")
 
     args = parser.parse_args()
@@ -98,7 +98,8 @@ def create_dataloader(args, config, opt):
 
     norm_mean, norm_std = const.get_norm_stats(config["backbone_name"])
     test_dataset = dataset.Dataset(
-        reals_name=args.reals,
+        real_paths=const.PATH_REAL_OOD if const.PATH_REAL_OOD else const.PATH_REAL,
+        fake_paths=const.PATH_FAKE,
         input_size=config["input_size"],
         is_train=False,
         is_val=False,
@@ -317,18 +318,16 @@ def _fit_calibrator(val_losses: np.ndarray, cand: dict, mu_patch=None, top_k=Non
     return info
 
 
-def _ood_acc(metrics_summary: dict) -> float:
+def _real_acc(metrics_summary: dict) -> float:
     """Extract the selection metric from a metrics summary.
     metrics_summary: output of eval_once.
-    Returns: mean OOD accuracy, or in_domain_real accuracy as fallback.
+    Returns: mean real-baseline accuracy.
     """
-    if 'vs_ood_real' in metrics_summary:
-        return metrics_summary['vs_ood_real'].get('mean_acc', 0.0)
-    return metrics_summary.get('in_domain_real', {}).get('mean_acc', 0.0)
+    return metrics_summary.get('real', {}).get('mean_acc', 0.0)
 
 
 def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
-    """Try all calibration candidates, keep the best by OOD accuracy, persist it.
+    """Try all calibration candidates, keep the best by real-baseline accuracy, persist it.
     model: FastFlow model.
     args: parsed CLI args.
     config: backbone config dict.
@@ -359,20 +358,19 @@ def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
                 threshold_info=thr,
                 wandb_log=False,
             )
-        rows.append((cand, thr, metrics, _ood_acc(metrics)))
+        rows.append((cand, thr, metrics, _real_acc(metrics)))
 
     print(f"\n{'─'*64}")
-    print(f"  {'Candidate':<36} {'OOD Acc':>9} {'Real Acc':>9}")
+    print(f"  {'Candidate':<36} {'Real Acc':>9}")
     print(f"{'─'*64}")
-    for cand, _, metrics, ood_acc_val in rows:
-        real_acc = metrics.get('in_domain_real', {}).get('mean_acc', 0.0)
-        print(f"  {cand['label']:<36} {ood_acc_val:>9.4f} {real_acc:>9.4f}")
+    for cand, _, metrics, real_acc_val in rows:
+        print(f"  {cand['label']:<36} {real_acc_val:>9.4f}")
     print(f"{'─'*64}")
 
-    best_cand, best_thr, best_metrics, best_ood = max(
+    best_cand, best_thr, best_metrics, best_real = max(
         rows, key=lambda x: (x[3], 0 if not x[0]['use_lof'] else -1)
     )
-    print(f"\n  Winner: {best_cand['label']}  (OOD Acc = {best_ood:.4f})\n")
+    print(f"\n  Winner: {best_cand['label']}  (Real Acc = {best_real:.4f})\n")
 
     print("=" * 64)
     print("Full evaluation — winner calibration")

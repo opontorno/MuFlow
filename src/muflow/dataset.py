@@ -34,7 +34,8 @@ def filter_files_by_csv_split(image_files, is_train, is_val=False):
 
 class Dataset:
     def __init__(self,
-    reals_name,
+    real_paths,
+    fake_paths=None,
     input_size=256,
     is_train=True,
     is_val=False,
@@ -47,7 +48,8 @@ class Dataset:
     norm_std=None,
     ):
         """
-        reals_name: real source ('ffhq' or 'celeba_hq').
+        real_paths: list of glob patterns for the real (class 0) images.
+        fake_paths: list of glob patterns for the fake images (test only).
         input_size: patch side.
         is_train: build the train/val dataset if True, else the test dataset.
         is_val: select the validation split (only meaningful with is_train).
@@ -59,7 +61,8 @@ class Dataset:
         norm_mean: normalization mean.
         norm_std: normalization std.
         """
-        self.reals_name = reals_name
+        self.real_paths = real_paths
+        self.fake_paths = fake_paths if fake_paths is not None else []
         self.is_train = is_train
         self.is_val = is_val
         self.input_size = input_size
@@ -75,29 +78,17 @@ class Dataset:
         """Build and return the configured DeepFakeDataset.
         Returns: DeepFakeDataset instance.
         """
-        if self.reals_name == 'ffhq':
-            root_dir = [f"{c.DATA_DIR}/datasets/ffhq/*"] if self.is_train \
-                        else [f"{c.DATA_DIR}/datasets/ffhq/*"] + [f"{c.DATA_DIR}/datasets/WILD/**/**"] + [f"{c.DATA_DIR}/datasets/datasets_DFX/**"] + [f"{c.DATA_DIR}/datasets/celeba_hq/val/**/*"]
-            file_pattern = "*.*g"
-        elif self.reals_name == 'celeba_hq':
-            root_dir = [f"{c.DATA_DIR}/datasets/celeba_hq/train/*"] if self.is_train \
-                        else [f"{c.DATA_DIR}/datasets/celeba_hq/val/*", f"{c.DATA_DIR}/datasets/WILD/*"] + [f"{c.DATA_DIR}/datasets/datasets_DFX/"] + [f"{c.DATA_DIR}/datasets/ffhq/"]
-            file_pattern = "**/*.*g"
-        else:
-            raise ValueError(f"Unsupported reals source: {self.reals_name!r}. Choose 'ffhq' or 'celeba_hq'.")
-
         if not self.is_train:
             print(f'Attack type: {self.attack_type}')
             if self.attack_type != 'none':
                 print(f'Attack params: {self.attack_params}')
 
         return DeepFakeDataset(
-            root_dir=root_dir,
-            file_pattern=file_pattern,
+            real_paths=self.real_paths,
+            fake_paths=self.fake_paths,
             input_size=self.input_size,
             is_train=self.is_train,
             is_val=self.is_val,
-            reals_name=self.reals_name,
             attack_type=self.attack_type,
             attack_params=self.attack_params,
             num_train_patches=self.num_train_patches,
@@ -109,17 +100,16 @@ class Dataset:
 
 
 class DeepFakeDataset(Dataset):
-    def __init__(self, root_dir, file_pattern, input_size=256, is_train=True, is_val=False, reals_name='ffhq',
+    def __init__(self, real_paths, fake_paths=None, input_size=256, is_train=True, is_val=False,
                  attack_type='none', attack_params=None, seed=124,
                  num_train_patches=c.PATCH_NUM_TRAIN, num_repr_patches=c.PATCH_NUM_REPR,
                  debug=False, norm_mean=None, norm_std=None):
         """
-        root_dir: list of glob roots to collect images from.
-        file_pattern: glob pattern appended to each root.
+        real_paths: list of glob patterns for the real (class 0) images.
+        fake_paths: list of glob patterns for the fake images (test only).
         input_size: patch side (no resize is applied).
         is_train: train/val mode if True, test mode otherwise.
         is_val: select the validation split.
-        reals_name: in-distribution real source.
         attack_type: test-time degradation.
         attack_params: parameters for the attack.
         seed: RNG seed for shuffling and balancing.
@@ -148,27 +138,26 @@ class DeepFakeDataset(Dataset):
 
         self.transform = make_patch_transform(norm_mean, norm_std)
 
-        self.image_files = [np.unique(np.array(glob(os.path.join(r, file_pattern), recursive=True))) for r in root_dir]
-        self.image_files = np.concatenate(self.image_files)
+        real_files = sorted({f for g in real_paths for f in glob(g, recursive=True)})
+        fake_files = sorted({f for g in (fake_paths or []) for f in glob(g, recursive=True)})
+        real_set = set(real_files)
 
+        self.image_files = np.array(real_files + fake_files)
         self.image_files = filter_files_by_csv_split(self.image_files, is_train, is_val)
-        self.classes = np.unique([f.split("/")[-2] for f in self.image_files if (f.split("/")[-3] != "ffhq" and f.split("/")[-4] != "celeba_hq")])
+
+        self.classes = np.unique([f.split("/")[-2] for f in self.image_files if f not in real_set])
         self.class_to_idx = {cls: idx + 1 for idx, cls in enumerate(self.classes)}
-        ood_reals = 'celeba_hq' if reals_name == 'ffhq' else 'ffhq'
-        self.class_to_idx[np.str_(ood_reals)] = 99
 
         self.labels = []
         for image_file in self.image_files:
-            if reals_name in image_file:
+            if image_file in real_set:
                 self.labels.append(0)
-            elif ood_reals in image_file:
-                self.labels.append(99)
             else:
                 class_name = image_file.split("/")[-2]
                 self.labels.append(self.class_to_idx[class_name])
 
         if not self.is_train:
-            min_count = min(sum(1 for label in self.labels if (label != 0 and label != 99)), self.labels.count(0))
+            min_count = min(sum(1 for label in self.labels if label != 0), self.labels.count(0))
             balanced_items = []
             for label in sorted(set(self.labels)):
                 label_items = [(img, lbl) for img, lbl in zip(self.image_files, self.labels) if lbl == label]
