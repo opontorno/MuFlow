@@ -3,7 +3,6 @@ import FrEIA.modules as Fm
 import timm
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from muflow import constants as const
 
@@ -17,20 +16,7 @@ def build_backbone(model_name: str, config: dict, device=None):
 
     out_indices = config.get("out_indices", [1, 2, 3])
 
-    if model_name in [const.BACKBONE_CAIT, const.BACKBONE_DEIT]:
-        backbone = timm.create_model(
-            config.get("backbone_name", model_name), pretrained=True, in_chans=3
-        )
-        backbone_type = "cait_deit"
-
-    elif model_name in const.DINO_BACKBONES:
-        backbone = timm.create_model(
-            const.DINO_TIMM_NAMES[model_name], pretrained=True,
-            img_size=config["input_size"]
-        )
-        backbone_type = "dino"
-
-    elif model_name in const.CLIP_BACKBONES:
+    if model_name in const.CLIP_BACKBONES:
         backbone = CLIPVisualExtractor(model_name, out_block_indices=out_indices)
         backbone_type = "clip"
 
@@ -157,28 +143,7 @@ class FastFlow(nn.Module):
             backbone_name in const.SUPPORTED_BACKBONES
         ), "backbone_name must be one of {}".format(const.SUPPORTED_BACKBONES)
 
-        if backbone_name in [const.BACKBONE_CAIT, const.BACKBONE_DEIT]:
-            self.backbone_type     = 'cait_deit'
-            self.feature_extractor = timm.create_model(backbone_name, pretrained=True, in_chans=in_channels)
-            channels = [768]
-            scales   = [16]
-
-        elif backbone_name in const.DINO_BACKBONES:
-            if in_channels != 3:
-                print(f"[WARNING] DINOv2 only supports in_channels=3; ignoring in_channels={in_channels}")
-            self.backbone_type  = 'dino'
-            timm_name           = const.DINO_TIMM_NAMES[backbone_name]
-            self.feature_extractor = timm.create_model(
-                timm_name, pretrained=True, img_size=input_size
-            )
-            self.dino_out_blocks = list(out_indices)
-            ch      = const.DINO_CHANNELS[backbone_name]
-            ps      = const.DINO_PATCH_SIZE[backbone_name]
-            num_out = len(out_indices)
-            channels = [ch] * num_out
-            scales   = [ps] * num_out
-
-        elif backbone_name in const.CLIP_BACKBONES:
+        if backbone_name in const.CLIP_BACKBONES:
             if in_channels != 3:
                 print(f"[WARNING] CLIP only supports in_channels=3; ignoring in_channels={in_channels}")
             self.backbone_type     = 'clip'
@@ -308,55 +273,6 @@ class FastFlow(nn.Module):
     def forward(self, x):
         """Forward pass: backbone features → flows → GMM scoring."""
         self.feature_extractor.eval()
-
-        if self.backbone_type == 'cait_deit':
-            if isinstance(self.feature_extractor, timm.models.vision_transformer.VisionTransformer):
-                x = self.feature_extractor.patch_embed(x)
-                cls_token = self.feature_extractor.cls_token.expand(x.shape[0], -1, -1)
-                if self.feature_extractor.dist_token is None:
-                    x = torch.cat((cls_token, x), dim=1)
-                else:
-                    x = torch.cat(
-                        (
-                            cls_token,
-                            self.feature_extractor.dist_token.expand(x.shape[0], -1, -1),
-                            x,
-                        ),
-                        dim=1,
-                    )
-                x = self.feature_extractor.pos_drop(x + self.feature_extractor.pos_embed)
-                for i in range(8):
-                    x = self.feature_extractor.blocks[i](x)
-                x = self.feature_extractor.norm(x)
-                x = x[:, 2:, :]
-                N, _, C = x.shape
-                x = x.permute(0, 2, 1)
-                x = x.reshape(N, C, self.input_size // 16, self.input_size // 16)
-                features = [x]
-            else:
-                x = self.feature_extractor.patch_embed(x)
-                x = x + self.feature_extractor.pos_embed
-                x = self.feature_extractor.pos_drop(x)
-                for i in range(41):
-                    x = self.feature_extractor.blocks[i](x)
-                N, _, C = x.shape
-                x = self.feature_extractor.norm(x)
-                x = x.permute(0, 2, 1)
-                x = x.reshape(N, C, self.input_size // 16, self.input_size // 16)
-                features = [x]
-
-        elif self.backbone_type == 'dino':
-            features = self.feature_extractor.get_intermediate_layers(
-                x, n=self.dino_out_blocks, reshape=True
-            )
-            features = [self.norms[i](f) for i, f in enumerate(features)]
-
-        elif self.backbone_type == 'clip':
-            features = self.feature_extractor(x)
-            features = [self.norms[i](f) for i, f in enumerate(features)]
-
-        else:
-            features = self.feature_extractor(x)
-            features = [self.norms[i](feature) for i, feature in enumerate(features)]
-
+        features = self.feature_extractor(x)
+        features = [self.norms[i](f) for i, f in enumerate(features)]
         return self.process_features(features)

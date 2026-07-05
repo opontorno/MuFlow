@@ -10,9 +10,6 @@ scratch/
 .python-version
 *.out
 *.log
-main_*.py
-eval_*.py
-preds_*.py
 tmp*
 scripts/*.ipynb
 **/.pictures/

@@ -73,8 +73,6 @@ def pool_features(feats, pooling_type):
 def extract_features(patch, backbone, backbone_type, out_indices, input_size,
                      norm_mean, norm_std, device):
     """Extract per-layer backbone features from a single patch."""
-    import timm.models.vision_transformer as _vit
-
     if isinstance(patch, np.ndarray):
         patch = Image.fromarray(patch.astype(np.uint8))
 
@@ -83,34 +81,7 @@ def extract_features(patch, backbone, backbone_type, out_indices, input_size,
     img_t = (torch.from_numpy(np.array(patch)).permute(2, 0, 1).unsqueeze(0).float().to(device) / 255.0 - mean) / std
 
     with torch.no_grad():
-        if backbone_type == 'cait_deit':
-            if isinstance(backbone, _vit.VisionTransformer):
-                x = backbone.patch_embed(img_t)
-                cls = backbone.cls_token.expand(x.shape[0], -1, -1)
-                if backbone.dist_token is None:
-                    x = torch.cat((cls, x), dim=1)
-                else:
-                    x = torch.cat((cls, backbone.dist_token.expand(x.shape[0], -1, -1), x), dim=1)
-                x = backbone.pos_drop(x + backbone.pos_embed)
-                for i in range(8):
-                    x = backbone.blocks[i](x)
-                x = backbone.norm(x)[:, 2:, :]
-                N, _, C = x.shape
-                return [x.permute(0, 2, 1).reshape(N, C, input_size // 16, input_size // 16)]
-            else:
-                x = backbone.patch_embed(img_t) + backbone.pos_embed
-                x = backbone.pos_drop(x)
-                for i in range(41):
-                    x = backbone.blocks[i](x)
-                x = backbone.norm(x)
-                N, _, C = x.shape
-                return [x.permute(0, 2, 1).reshape(N, C, input_size // 16, input_size // 16)]
-
-        elif backbone_type == 'dino':
-            return list(backbone.get_intermediate_layers(img_t, n=list(out_indices), reshape=True))
-
-        else:
-            return list(backbone(img_t))
+        return list(backbone(img_t))
 
 
 def image_centroid(img, P, k, seed, backbone, backbone_type, out_indices,
