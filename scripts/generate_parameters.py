@@ -15,9 +15,9 @@ PREFIX = ""
 MEANS_DIR = os.path.join(const.DATA_DIR, "datasets_means", "500")
 
 parser = argparse.ArgumentParser(description='Generate GMM parameters for FastFlow')
-parser.add_argument('-model', '--model_name', type=str, default='resnet50')
-parser.add_argument('-reals', '--reals', type=str, default='ffhq',
-                    choices=['ffhq', 'celeba_hq', 'ffhq+celeba_hq'])
+parser.add_argument('-model', '--model_name', type=str, required=True)
+parser.add_argument('-reals', '--reals', type=str, default=const.real_tag(const.PATH_REAL),
+                    help="real source name (mean-images subfolder); defaults to the PATH_REAL tag")
 args = parser.parse_args()
 
 model_name = args.model_name

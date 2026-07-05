@@ -25,17 +25,12 @@ REAL_SOURCES = {"ffhq", "celeba hq"}
 
 
 def _norm(s: str) -> str:
-    """Normalize a source name for comparison.
-    s: source name.
-    Returns: lowercased, underscore-to-space, stripped string.
-    """
+    """Normalize a source name for comparison."""
     return s.lower().replace("_", " ").strip()
 
 
 def get_args():
-    """Parse command-line arguments.
-    Returns: argparse.Namespace.
-    """
+    """Parse command-line arguments."""
     p = argparse.ArgumentParser()
     p.add_argument("--model_name", type=str, default="resnet50",
                    help="Backbone name (must have a configs/<model_name>.yaml).")
@@ -52,22 +47,7 @@ def get_args():
 
 def collect(means_dir, sources, P, k, seed, sample_size,
             backbone, backbone_type, out_indices, pooling, norm_mean, norm_std, device):
-    """Compute per-layer patch-centroid features for every source.
-    means_dir: directory with one subfolder of mean images per source.
-    sources: source subfolder names.
-    P: patch side.
-    k: patches per image.
-    seed: RNG seed for the patches.
-    sample_size: max mean images sampled per source.
-    backbone: frozen backbone.
-    backbone_type: backbone family string.
-    out_indices: layer indices.
-    pooling: spatial pooling mode.
-    norm_mean: normalization mean.
-    norm_std: normalization std.
-    device: torch device.
-    Returns: dict {layer_idx: (X, y, source_labels)} with y=1 fake / 0 real.
-    """
+    """Compute per-layer patch-centroid features for every source."""
     num_layers   = len(out_indices)
     by_layer_X   = {i: [] for i in range(num_layers)}
     y, labels    = [], []

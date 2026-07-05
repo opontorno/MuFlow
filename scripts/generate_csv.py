@@ -18,11 +18,7 @@ N_FAKE_PER_CLASS = 1000
 
 
 def split_by_class(pattern, label="class"):
-    """Split files grouped by generator, capped per class, into 70-15-15.
-    pattern: glob pattern (generator = second-to-last path component).
-    label: name used in the progress printout.
-    Returns: list of [path, split] rows.
-    """
+    """Split files grouped by generator, capped per class, into 70-15-15."""
     files_by_class = defaultdict(list)
     for f in glob.glob(pattern):
         files_by_class[f.split(os.sep)[-2]].append(f)
@@ -44,11 +40,7 @@ def split_by_class(pattern, label="class"):
 
 
 def split_random(pattern, label=""):
-    """Split files into a random 70-15-15 split (no class grouping).
-    pattern: glob pattern (recursive).
-    label: name used in the progress printout.
-    Returns: list of [path, split] rows.
-    """
+    """Split files into a random 70-15-15 split (no class grouping)."""
     files = glob.glob(pattern, recursive=True)
     random.shuffle(files)
     n_train = int(len(files) * 0.70)

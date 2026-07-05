@@ -1,6 +1,4 @@
 import argparse
-import contextlib
-import io
 import json
 import os
 import glob as glob_module
@@ -11,11 +9,11 @@ import torch
 import yaml
 from PIL import Image
 from scipy.stats import norm
-from sklearn.neighbors import LocalOutlierFactor
 from tqdm import tqdm
 
 from muflow import constants as const
 from muflow import dataset
+from muflow import calibration
 from muflow.gpu_utils import resolve_device
 from muflow.patch_utils import make_patch_transform, repr_patches
 
@@ -34,35 +32,50 @@ from main import (
 )
 
 
+ROBUSTNESS_ATTACKS = [
+    ('jpeg', {'quality': 90}),
+    ('jpeg', {'quality': 80}),
+    ('jpeg', {'quality': 70}),
+    ('jpeg', {'quality': 60}),
+    ('jpeg', {'quality': 50}),
+    ('jpeg', {'quality': 40}),
+    ('jpeg', {'quality': 30}),
+    ('jpeg', {'quality': 20}),
+    ('gaussian_blur', {'kernel_size': 3, 'sigma': 1.0}),
+    ('gaussian_blur', {'kernel_size': 5, 'sigma': 2.0}),
+    ('rotation', {'angle': 30}),
+    ('rotation', {'angle': 180}),
+    ('gaussian_noise', {'mean': 0, 'std': 0.05}),
+    ('salt_pepper', {'amount': 0.02}),
+    ('resize', {'scale_factor': 0.5}),
+    ('horizontal_flip', {}),
+    ('random_crop', {'crop_ratio': 0.95}),
+]
+
+
 def parse_args():
-    """Parse CLI args and merge them with the run's saved config.
-    Returns: argparse.Namespace with run_config.yaml values and resolved paths.
-    """
+    """Parse CLI args and merge them with the run's saved config."""
     parser = argparse.ArgumentParser(
-        description="Evaluate a MuFlow run. All settings are loaded automatically "
-                    "from run_dir/run_config.yaml. Only eval-specific options are needed.")
-    parser.add_argument("--run_dir", type=str, required=True,
-                        help="Directory of a training run (must contain best.pt, "
-                             "thresholds.npz and run_config.yaml).")
+        description="Evaluate a MuFlow run; settings are loaded from run_dir/run_config.yaml.")
+    parser.add_argument("--run_dir", type=str, required=True, help="training run directory")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--custom_dirs", type=str, nargs='+', default=None,
-                        help="One or more folder paths or glob patterns containing images to evaluate "
-                             "(png/jpg/jpeg). Each dir needs a corresponding entry in --custom_labels.")
+                        help="folders or globs of images to evaluate; one --custom_labels each")
     parser.add_argument("--custom_labels", type=int, nargs='+', default=None,
-                        help="Class label for each --custom_dirs entry: 0=real, 1=fake. "
-                             "Must have the same length as --custom_dirs.")
-    parser.add_argument("--gpu_id", type=int, default=None,
-                        help="GPU to use (default: auto-select the one with most free memory).")
+                        help="label per --custom_dirs entry: 0=real, 1=fake")
+    parser.add_argument("--gpu_id", type=int, default=None, help="GPU id; None auto-selects the freest")
     parser.add_argument("--top_k", type=int, default=argparse.SUPPRESS,
-                        help="override the run's top_k patch aggregation (inference-only); "
-                             "recomputes the validation threshold to stay consistent. None/0 = all patches.")
+                        help="override the run's top_k aggregation and recompute the threshold")
+    parser.add_argument("--alpha", type=float, default=argparse.SUPPRESS,
+                        help="override the threshold with a gaussian band at this false-positive rate")
     parser.add_argument("--recalibrate", action="store_true", default=False,
-                        help="Run a full calibration sweep (threshold α∈{0.01,0.05,0.10} + LOF) "
-                             "on the val set, pick the best by real-baseline accuracy, and overwrite the "
-                             "saved calibration in run_dir. Always uses the clean test set.")
+                        help="sweep calibration candidates and persist the best by real accuracy")
+    parser.add_argument("--robustness", action="store_true", default=False,
+                        help="also evaluate under the robustness degradations")
 
     args = parser.parse_args()
     args._top_k_override = hasattr(args, 'top_k')
+    args._alpha_override = hasattr(args, 'alpha')
 
     run_cfg_path = os.path.join(args.run_dir, 'run_config.yaml')
     if not os.path.exists(run_cfg_path):
@@ -87,12 +100,7 @@ def parse_args():
 
 
 def create_dataloader(args, config, opt):
-    """Build a test DataLoader with an optional robustness attack.
-    args: parsed CLI args.
-    config: backbone config dict.
-    opt: object carrying attack_type, attack_params and batch_size.
-    Returns: (DataLoader, idx2class).
-    """
+    """Build a test DataLoader with an optional robustness attack."""
     attack_type   = getattr(opt, 'attack_type', 'none')
     attack_params = getattr(opt, 'attack_params', {})
 
@@ -122,10 +130,7 @@ def create_dataloader(args, config, opt):
 
 
 def _dir_name_from_path(path_or_glob):
-    """Derive a readable group name from a path or glob.
-    path_or_glob: folder path or glob pattern.
-    Returns: the last literal path component, or a hash-based fallback.
-    """
+    """Derive a readable group name from a path or glob."""
     parts = path_or_glob.replace('\\', '/').rstrip('/').split('/')
     for part in reversed(parts):
         if part and '*' not in part and '?' not in part:
@@ -134,10 +139,7 @@ def _dir_name_from_path(path_or_glob):
 
 
 def collect_custom_images(path_or_glob):
-    """Collect image files from a folder or glob.
-    path_or_glob: folder path or glob pattern.
-    Returns: unique list of image file paths.
-    """
+    """Collect image files from a folder or glob."""
     valid_ext = {'.png', '.jpg', '.jpeg'}
     img_exts  = ['*.png', '*.PNG', '*.jpg', '*.JPG', '*.jpeg', '*.JPEG']
 
@@ -161,14 +163,6 @@ def collect_custom_images(path_or_glob):
 class CustomImageDataset(torch.utils.data.Dataset):
     def __init__(self, image_paths, labels, input_size, norm_mean=None, norm_std=None,
                  num_repr_patches=const.PATCH_NUM_REPR):
-        """
-        image_paths: list of image file paths.
-        labels: per-image group id / label.
-        input_size: patch side.
-        norm_mean: normalization mean.
-        norm_std: normalization std.
-        num_repr_patches: deterministic patches per image.
-        """
         self.image_paths = image_paths
         self.labels      = labels
         self.P           = input_size if isinstance(input_size, int) else input_size[0]
@@ -179,10 +173,7 @@ class CustomImageDataset(torch.utils.data.Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        """Return one item.
-        idx: sample index.
-        Returns: ((N, 3, P, P) patches, label).
-        """
+        """Return one item."""
         img = Image.open(self.image_paths[idx]).convert('RGB')
         plist = repr_patches(img, self.P, self.num_repr_patches, const.PATCH_SEED)
         patches = torch.stack([self.transform(p).float() for p in plist])
@@ -190,11 +181,7 @@ class CustomImageDataset(torch.utils.data.Dataset):
 
 
 def create_custom_dataloader(args, config):
-    """Build a DataLoader over user-provided custom dirs.
-    args: parsed CLI args (custom_dirs, custom_labels).
-    config: backbone config dict.
-    Returns: (DataLoader, groups metadata list).
-    """
+    """Build a DataLoader over user-provided custom dirs."""
     if args.custom_labels is None or len(args.custom_labels) != len(args.custom_dirs):
         raise ValueError(
             "--custom_labels must be provided and have the same length as --custom_dirs.")
@@ -227,12 +214,7 @@ def create_custom_dataloader(args, config):
 
 
 def eval_custom(dataloader, model, groups, threshold_info):
-    """Score custom dirs and print per-group accuracy.
-    dataloader: DataLoader yielding (patches, group_id).
-    model: FastFlow model.
-    groups: group metadata list from create_custom_dataloader.
-    threshold_info: calibration dict.
-    """
+    """Score custom dirs and print per-group accuracy."""
     model.eval()
     preds_list, group_ids_list = [], []
     device = next(model.nf_flows[0].parameters()).device
@@ -282,61 +264,31 @@ def eval_custom(dataloader, model, groups, threshold_info):
     print("=" * 50)
 
 
-SWEEP_CANDIDATES = [
-    {'label': 'threshold  α=0.01', 'use_lof': False, 'alpha': 0.01, 'contamination': None},
-    {'label': 'threshold  α=0.05', 'use_lof': False, 'alpha': 0.05, 'contamination': None},
-    {'label': 'threshold  α=0.10', 'use_lof': False, 'alpha': 0.10, 'contamination': None},
-    {'label': "LOF  (contamination='auto')", 'use_lof': True,  'alpha': None, 'contamination': 'auto'},
-]
+def _maybe_promote_calibration(threshold_info: dict, metrics_summary: dict, args) -> None:
+    """Compare an eval-time calibration override against the saved champion, promote if better."""
+    if not (getattr(args, '_alpha_override', False) or getattr(args, '_top_k_override', False)):
+        return
 
+    new_acc = calibration.real_acc(metrics_summary)
+    canonical_acc = calibration.load_canonical_accuracy(args.run_dir)
+    print(f"\n[champion] Real Acc: this={new_acc:.4f}  canonical={canonical_acc:.4f}")
 
-@contextlib.contextmanager
-def _mute():
-    """Context manager that suppresses stdout."""
-    with contextlib.redirect_stdout(io.StringIO()):
-        yield
-
-
-def _fit_calibrator(val_losses: np.ndarray, cand: dict, mu_patch=None, top_k=None) -> dict:
-    """Fit one calibration candidate on validation scores.
-    val_losses: per-image validation NLL scores.
-    cand: candidate spec (use_lof, alpha, contamination).
-    mu_patch: validation patch-mean to store.
-    top_k: aggregation top_k to store.
-    Returns: threshold_info dict.
-    """
-    mean, std = float(val_losses.mean()), float(val_losses.std())
-    info = {'mean': mean, 'std': std, 'losses': val_losses, 'mu_patch': mu_patch, 'top_k': top_k}
-    if cand['use_lof']:
-        lof = LocalOutlierFactor(novelty=True, contamination=cand['contamination'], n_jobs=-1)
-        lof.fit(val_losses.reshape(-1, 1))
-        info['lof'] = lof
+    if new_acc > canonical_acc:
+        cand = {
+            'use_lof':       'lof' in threshold_info,
+            'alpha':         float(getattr(args, 'alpha', 0.1)),
+            'contamination': getattr(args, 'contamination', 'auto'),
+        }
+        calibration.persist_calibration(
+            threshold_info, cand, metrics_summary,
+            run_dir=args.run_dir, threshold_path=args.threshold_path, lof_checkpoint=args.lof_checkpoint)
+        print(f"[champion] New champion calibration!  {new_acc:.4f} > {canonical_acc:.4f}")
     else:
-        z = norm.ppf(1 - cand['alpha'])
-        info['l_threshold'] = mean - z * std
-        info['u_threshold'] = mean + z * std
-    return info
-
-
-def _real_acc(metrics_summary: dict) -> float:
-    """Extract the selection metric from a metrics summary.
-    metrics_summary: output of eval_once.
-    Returns: mean real-baseline accuracy.
-    """
-    return metrics_summary.get('real', {}).get('mean_acc', 0.0)
+        print(f"[champion] No promotion. Canonical remains at {canonical_acc:.4f}")
 
 
 def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
-    """Try all calibration candidates, keep the best by real-baseline accuracy, persist it.
-    model: FastFlow model.
-    args: parsed CLI args.
-    config: backbone config dict.
-    class2idx: mapping class id -> name.
-    test_dataloader: clean test DataLoader shared across candidates.
-    Returns: winning threshold_info dict.
-    """
-    device = next(model.nf_flows[0].parameters()).device
-
+    """Try all calibration candidates, keep the best by real-baseline accuracy, persist it."""
     print("\n" + "=" * 64)
     print("Recalibration sweep")
     print("=" * 64)
@@ -348,28 +300,9 @@ def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
           f"mean={val_losses.mean():.4f}  std={val_losses.std():.4f}")
 
     print("\nSweeping calibration candidates (clean test set)...")
-    rows = []
-    for cand in SWEEP_CANDIDATES:
-        thr = _fit_calibrator(val_losses, cand, mu_patch=mu_patch, top_k=top_k)
-        with _mute():
-            _, _, _, metrics = eval_once(
-                test_dataloader, model,
-                class2idx=class2idx,
-                threshold_info=thr,
-                wandb_log=False,
-            )
-        rows.append((cand, thr, metrics, _real_acc(metrics)))
-
-    print(f"\n{'─'*64}")
-    print(f"  {'Candidate':<36} {'Real Acc':>9}")
-    print(f"{'─'*64}")
-    for cand, _, metrics, real_acc_val in rows:
-        print(f"  {cand['label']:<36} {real_acc_val:>9.4f}")
-    print(f"{'─'*64}")
-
-    best_cand, best_thr, best_metrics, best_real = max(
-        rows, key=lambda x: (x[3], 0 if not x[0]['use_lof'] else -1)
-    )
+    best_cand, best_thr, best_metrics, best_real, rows = calibration.run_sweep(
+        model, val_losses, mu_patch, top_k, test_dataloader, class2idx, eval_once)
+    calibration.print_sweep_table(rows)
     print(f"\n  Winner: {best_cand['label']}  (Real Acc = {best_real:.4f})\n")
 
     print("=" * 64)
@@ -378,63 +311,15 @@ def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
     eval_once(test_dataloader, model, class2idx=class2idx,
               threshold_info=best_thr, wandb_log=False)
 
-    _persist_calibration(best_thr, best_cand, best_metrics, args)
+    calibration.persist_calibration(
+        best_thr, best_cand, best_metrics,
+        run_dir=args.run_dir, threshold_path=args.threshold_path, lof_checkpoint=args.lof_checkpoint)
 
     return best_thr
 
 
-def _persist_calibration(threshold_info: dict, cand: dict,
-                         metrics_summary: dict, args) -> None:
-    """Persist the winning calibration to the run folder.
-    threshold_info: winning calibration dict.
-    cand: winning candidate spec.
-    metrics_summary: metrics of the winner.
-    args: parsed CLI args (provides run_dir and file paths).
-    """
-    run_dir = args.run_dir
-
-    save_keys = ('l_threshold', 'u_threshold', 'threshold', 'losses', 'mean', 'std', 'mu_patch', 'top_k')
-    np.savez(args.threshold_path,
-             **{k: threshold_info[k] for k in save_keys
-                if k in threshold_info and threshold_info[k] is not None})
-    print(f"\n  Saved thresholds     → {args.threshold_path}")
-
-    if 'lof' in threshold_info:
-        joblib.dump(threshold_info['lof'], args.lof_checkpoint)
-        print(f"  Saved LOF model      → {args.lof_checkpoint}")
-    elif os.path.exists(args.lof_checkpoint):
-        os.remove(args.lof_checkpoint)
-
-    metrics_path = os.path.join(run_dir, 'best_metrics.json')
-    if os.path.exists(metrics_path):
-        with open(metrics_path) as f:
-            payload = json.load(f)
-        payload['metrics']     = metrics_summary
-        payload['calibration'] = {
-            'method':        'lof' if cand['use_lof'] else 'gaussian',
-            'alpha':         cand['alpha'],
-            'contamination': cand['contamination'],
-        }
-        with open(metrics_path, 'w') as f:
-            json.dump(payload, f, indent=2)
-        print(f"  Updated best_metrics.json")
-
-    cfg_path = os.path.join(run_dir, 'run_config.yaml')
-    if os.path.exists(cfg_path):
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
-        cfg['use_lof']       = cand['use_lof']
-        cfg['alpha']         = cand['alpha']
-        cfg['contamination'] = cand['contamination']
-        with open(cfg_path, 'w') as f:
-            yaml.dump(cfg, f, default_flow_style=False)
-        print(f"  Updated run_config.yaml")
-
-
 def evaluate(args):
-    """Run evaluation for a training run (sweep, custom dirs, or standard).
-    args: parsed CLI args.
-    """
+    """Run evaluation for a training run (sweep, custom dirs, or standard)."""
     config     = yaml.safe_load(open(args.config, "r"))
     checkpoint = torch.load(args.checkpoint, map_location='cpu')
 
@@ -447,6 +332,9 @@ def evaluate(args):
         test_dataloader, class2idx = build_test_data_loader(args, config)
         _recalibrate_sweep(model, args, config, class2idx, test_dataloader)
         return
+
+    if getattr(args, '_alpha_override', False):
+        args.use_lof = False
 
     threshold_info = None
     if os.path.exists(args.threshold_path):
@@ -494,32 +382,23 @@ def evaluate(args):
         threshold_info['lof'] = joblib.load(args.lof_checkpoint)
         print(f"Loaded LOF model from {args.lof_checkpoint}")
 
+    if getattr(args, '_alpha_override', False):
+        z = norm.ppf(1 - args.alpha)
+        threshold_info.pop('lof', None)
+        threshold_info['l_threshold'] = threshold_info['mean'] - z * threshold_info['std']
+        threshold_info['u_threshold'] = threshold_info['mean'] + z * threshold_info['std']
+        print(f"[eval] --alpha override → gaussian band recomputed with alpha={args.alpha} "
+              f"(l={threshold_info['l_threshold']:.4f}, u={threshold_info['u_threshold']:.4f})")
+
     if args.custom_dirs is not None:
         print(f"\n{'='*60}\nCustom dirs evaluation\n{'='*60}")
         custom_loader, groups = create_custom_dataloader(args, config)
         eval_custom(custom_loader, model, groups, threshold_info)
         return
 
-    attacks_configs = [
-        ('none', {}),
-        # ('jpeg', {'quality': 90}),
-        # ('jpeg', {'quality': 80}),
-        # ('jpeg', {'quality': 70}),
-        # ('jpeg', {'quality': 60}),
-        # ('jpeg', {'quality': 50}),
-        # ('jpeg', {'quality': 40}),
-        # ('jpeg', {'quality': 30}),
-        # ('jpeg', {'quality': 20}),
-        # ('gaussian_blur', {'kernel_size': 3, 'sigma': 1.0}),
-        # ('gaussian_blur', {'kernel_size': 5, 'sigma': 2.0}),
-        # ('rotation', {'angle': 30}),
-        # ('rotation', {'angle': 180}),
-        # ('gaussian_noise', {'mean': 0, 'std': 0.05}),
-        # ('salt_pepper', {'amount': 0.02}),
-        # ('resize', {'scale_factor': 0.5}),
-        # ('horizontal_flip', {}),
-        # ('random_crop', {'crop_ratio': 0.95}),
-    ]
+    attacks_configs = [('none', {})]
+    if getattr(args, 'robustness', False):
+        attacks_configs += ROBUSTNESS_ATTACKS
 
     for attack_type, attack_params in attacks_configs:
         print(f"\n{'='*60}")
@@ -535,8 +414,11 @@ def evaluate(args):
         opt.attack_params = attack_params
         test_dataloader, class2idx = create_dataloader(args, config, opt)
 
-        eval_once(test_dataloader, model,
-                  class2idx=class2idx, threshold_info=threshold_info)
+        _, _, _, metrics_summary = eval_once(
+            test_dataloader, model, class2idx=class2idx, threshold_info=threshold_info)
+
+        if attack_type == 'none':
+            _maybe_promote_calibration(threshold_info, metrics_summary, args)
 
 
 if __name__ == "__main__":

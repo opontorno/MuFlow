@@ -16,6 +16,7 @@ from muflow import constants as const
 from muflow import dataset
 from muflow import model as fastflow
 from muflow import utils
+from muflow import calibration
 from muflow.gpu_utils import resolve_device
 
 import seaborn as sns
@@ -36,10 +37,7 @@ MIX_2CLASS = {'STARGAN', 'StyleGAN2', 'Stable DIffusion 3.5', 'Flux.1.1 Pro'}
 
 
 def _aggregate_by_family(results):
-    """Group per-class result dicts by generator family.
-    results: list of per-class metric dicts (None entries ignored).
-    Returns: dict {'all','gan','dm_open','dm_closed','mix'} -> list of dicts.
-    """
+    """Group per-class result dicts by generator family."""
     fam = {'all': [], 'gan': [], 'dm_open': [], 'dm_closed': [], 'mix': []}
     for r in results:
         if r is None:
@@ -54,9 +52,7 @@ def _aggregate_by_family(results):
 
 
 def _print_family_summary(fam):
-    """Print mean metrics overall and per family.
-    fam: output of _aggregate_by_family.
-    """
+    """Print mean metrics overall and per family."""
     keys = ['accuracy', 'acc_oracle', 'acc_oracle_bi', 'ap', 'roc']
 
     def _m(rs, k): return np.mean([r[k] for r in rs])
@@ -80,57 +76,52 @@ def _print_family_summary(fam):
 
 
 def parse_args():
-    """Parse command-line arguments.
-    Returns: argparse.Namespace.
-    """
+    """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default='configs/resnet50.yaml', help="path to config file")
-
-    parser.add_argument("--checkpoint", type=str, help="path to load checkpoint")
+    parser.add_argument("--config", type=str, required=True, help="path to the model config YAML")
+    parser.add_argument("--checkpoint", type=str, help="checkpoint to resume from")
 
     parser.add_argument('--wandb', default='online', choices=['online', 'offline', 'disabled'])
-    parser.add_argument('--wandb_entity', type=str, default='orazio-mattia', help="W&B entity (team/user). Default: your default W&B entity.")
-    parser.add_argument('--wandb_project', type=str, default='MuFlow', help="W&B project name.")
+    parser.add_argument('--wandb_entity', type=str, default='orazio-mattia')
+    parser.add_argument('--wandb_project', type=str, default='MuFlow')
 
     parser.add_argument('--num_train_patches', type=int, default=const.PATCH_NUM_TRAIN,
-                        help="random native patches sampled per training image (per step)")
+                        help="random patches per training image")
     parser.add_argument('--num_repr_patches', type=int, default=const.PATCH_NUM_REPR,
-                        help="patches per image to build the inference/threshold representation")
+                        help="patches per image for the inference representation")
     parser.add_argument('--top_k', type=int, default=None,
-                        help="signed-mean over the top_k patches most deviant from the val patch mean; None/0 = all patches (plain mean)")
+                        help="signed-mean over the top_k most deviant patches; None = all")
     parser.add_argument('--run_name', type=str)
     parser.add_argument('--eval_interval', type=int, default=1)
-    parser.add_argument('--backbone_weights', type=str, help="path to load backbone weights")
+    parser.add_argument('--backbone_weights', type=str, help="backbone weights to load")
     parser.add_argument('--log_interval', type=int, default=10)
-    parser.add_argument('--num_workers', type=int, default=4, help="number of data loading workers")
-    parser.add_argument('--debug', action='store_true', help="Debug mode with reduced dataset size")
-    parser.add_argument('--gpu_id', type=int, default=None, help="Manually specify GPU ID to use (default: auto-select GPU with most free memory)")
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--debug', action='store_true', help="reduced dataset for quick runs")
+    parser.add_argument('--gpu_id', type=int, default=None, help="GPU id; None auto-selects the freest")
 
     parser.add_argument('--optimizer', type=str, default='AdamW', choices=['AdamW', 'sgd'])
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--num_epochs', type=int, default=1000)
-    parser.add_argument('--scheduler', action='store_true', default=True, help="Enable LR scheduler (default: on)")
+    parser.add_argument('--scheduler', action='store_true', default=True)
     parser.add_argument('--lr_decay', type=float, default=0.7)
     parser.add_argument('--lr_patience', type=int, default=35)
 
-    parser.add_argument('--alpha', type=float, default=0.1, help="Target false positive rate under the normality assumption")
-    parser.add_argument('--use_lof', action='store_true', default=False, help="Enable Local Outlier Factor threshold")
+    parser.add_argument('--alpha', type=float, default=0.1, help="target false-positive rate for the threshold band")
+    parser.add_argument('--use_lof', action='store_true', default=False, help="calibrate with LOF instead of a band")
     parser.add_argument('--contamination', default='auto')
+    parser.add_argument('--auto_recalibrate', action='store_true', default=True,
+                        help="recalibrate the champion threshold after promotion")
 
-    parser.add_argument('-patience', '--early_stopping_patience', type=float, default=50,
-                        help="Patience epochs for early stopping based on Val Acc")
+    parser.add_argument('-patience', '--early_stopping_patience', type=float, default=50)
 
     args = parser.parse_args()
     return args
 
 
 def _load_canonical_metric(canonical_dir):
-    """Read the reference metric of the canonical champion folder.
-    canonical_dir: champion folder path.
-    Returns: float reference metric (0.0 if missing/unreadable).
-    """
+    """Read the reference metric of the canonical champion folder."""
     path = os.path.join(canonical_dir, 'best_metrics.json')
     if not os.path.exists(path):
         return 0.0
@@ -142,10 +133,7 @@ def _load_canonical_metric(canonical_dir):
 
 
 def _promote_to_canonical(temp_dir, canonical_dir):
-    """Copy the temporary run files into the canonical champion folder.
-    temp_dir: source run folder.
-    canonical_dir: destination champion folder.
-    """
+    """Copy the temporary run files into the canonical champion folder."""
     os.makedirs(canonical_dir, exist_ok=True)
     for fname in os.listdir(temp_dir):
         src = os.path.join(temp_dir, fname)
@@ -154,24 +142,43 @@ def _promote_to_canonical(temp_dir, canonical_dir):
     print(f"[champion] Promoted → {canonical_dir}")
 
 
+def _auto_recalibrate_champion(model, val_dataloader, test_dataloader, class2idx,
+                               canonical_checkpoint_dir, top_k, device):
+    """Sweep calibration candidates on the promoted champion, persist the best by real accuracy."""
+    print("\n" + "=" * 64)
+    print("[auto-recalibrate] Sweeping calibration on the champion...")
+    print("=" * 64)
+
+    champion_ckpt = torch.load(os.path.join(canonical_checkpoint_dir, "best.pt"), map_location=device)
+    model.load_state_dict(champion_ckpt["model_state_dict"])
+
+    print("Collecting val NLL scores...", flush=True)
+    val_losses, mu_patch = _collect_val_scores(model, val_dataloader, top_k)
+    print(f"  {len(val_losses)} real images — "
+          f"mean={val_losses.mean():.4f}  std={val_losses.std():.4f}")
+
+    print("\nSweeping calibration candidates (clean test set)...")
+    best_cand, best_thr, best_metrics, best_real, rows = calibration.run_sweep(
+        model, val_losses, mu_patch, top_k, test_dataloader, class2idx, eval_once)
+    calibration.print_sweep_table(rows)
+    print(f"\n  Winner: {best_cand['label']}  (Real Acc = {best_real:.4f})\n")
+
+    calibration.persist_calibration(
+        best_thr, best_cand, best_metrics,
+        run_dir=canonical_checkpoint_dir,
+        threshold_path=os.path.join(canonical_checkpoint_dir, "thresholds.npz"),
+        lof_checkpoint=os.path.join(canonical_checkpoint_dir, "lof_model.pkl"))
+
+
 def _cleanup_temp(temp_dir):
-    """Delete the temporary run folder.
-    temp_dir: folder to remove.
-    """
+    """Delete the temporary run folder."""
     if os.path.isdir(temp_dir):
         shutil.rmtree(temp_dir)
         print(f"[champion] Removed temp folder: {temp_dir}")
 
 
 def _build_metrics_json(run_name, canonical_dir, epoch, reference_metric, metrics):
-    """Assemble the best_metrics.json payload.
-    run_name: temporary run name.
-    canonical_dir: champion folder path.
-    epoch: best epoch.
-    reference_metric: selection metric value.
-    metrics: metrics summary dict.
-    Returns: dict payload.
-    """
+    """Assemble the best_metrics.json payload."""
     def _r(x, d=6):
         return round(float(x), d)
 
@@ -185,16 +192,7 @@ def _build_metrics_json(run_name, canonical_dir, epoch, reference_metric, metric
 
 
 def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last, return_class2idx=False):
-    """Build a DataLoader over the configured dataset.
-    args: parsed CLI args.
-    config: backbone config dict.
-    is_train: train/val dataset if True, else test.
-    is_val: select the validation split.
-    shuffle: shuffle samples.
-    drop_last: drop the last incomplete batch.
-    return_class2idx: also return the idx->class mapping.
-    Returns: DataLoader, or (DataLoader, idx2class) if return_class2idx.
-    """
+    """Build a DataLoader over the configured dataset."""
     norm_mean, norm_std = const.get_norm_stats(config["backbone_name"])
     if is_train:
         real_paths = const.PATH_REAL
@@ -232,38 +230,22 @@ def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last
 
 
 def build_train_data_loader(args, config):
-    """Build the training DataLoader.
-    args: parsed CLI args.
-    config: backbone config dict.
-    Returns: DataLoader.
-    """
+    """Build the training DataLoader."""
     return _build_data_loader_common(args, config, is_train=True, is_val=False, shuffle=True, drop_last=True)
 
 
 def build_val_data_loader(args, config):
-    """Build the validation DataLoader.
-    args: parsed CLI args.
-    config: backbone config dict.
-    Returns: DataLoader.
-    """
+    """Build the validation DataLoader."""
     return _build_data_loader_common(args, config, is_train=True, is_val=True, shuffle=False, drop_last=False)
 
 
 def build_test_data_loader(args, config):
-    """Build the test DataLoader.
-    args: parsed CLI args.
-    config: backbone config dict.
-    Returns: (DataLoader, idx2class).
-    """
+    """Build the test DataLoader."""
     return _build_data_loader_common(args, config, is_train=False, is_val=False, shuffle=False, drop_last=False, return_class2idx=True)
 
 
 def build_model(config, args):
-    """Build the FastFlow model, generating GMM parameters if missing.
-    config: backbone config dict.
-    args: parsed CLI args.
-    Returns: FastFlow model.
-    """
+    """Build the FastFlow model, generating GMM parameters if missing."""
     out_indices = config.get("out_indices", [1, 2, 3])
     out_indices_str = str(out_indices)
     pooling_type = config.get("pooling_type", "mean")
@@ -313,12 +295,7 @@ def build_model(config, args):
 
 
 def build_optimizer(args, model, config):
-    """Build the optimizer.
-    args: parsed CLI args.
-    model: model whose parameters are optimized.
-    config: backbone config dict.
-    Returns: torch optimizer.
-    """
+    """Build the optimizer."""
     if args.optimizer == "AdamW":
         return torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     elif args.optimizer == "sgd":
@@ -328,11 +305,7 @@ def build_optimizer(args, model, config):
 
 
 def _per_patch_scores(model, patches):
-    """Score every patch of every image.
-    model: FastFlow model.
-    patches: (B, N, 3, P, P) tensor.
-    Returns: (loss, mahalanobis) tensors of shape (B, N).
-    """
+    """Score every patch of every image."""
     B, N = patches.shape[0], patches.shape[1]
     flat = patches.reshape(B * N, *patches.shape[2:])
     ret = model(flat)
@@ -340,13 +313,7 @@ def _per_patch_scores(model, patches):
 
 
 def aggregate_scores(loss_pp, maha_pp, top_k=None, mu_patch=None):
-    """Aggregate per-patch scores into one score per image.
-    loss_pp: (B, N) per-patch NLL.
-    maha_pp: (B, N) per-patch Mahalanobis distance.
-    top_k: keep the top_k patches most deviant from mu_patch; None/0/>=N = all.
-    mu_patch: validation patch-mean used as the deviation center.
-    Returns: (loss, mahalanobis) tensors of shape (B,).
-    """
+    """Aggregate per-patch scores into one score per image."""
     N = loss_pp.shape[1]
     if not top_k or top_k >= N or mu_patch is None:
         return loss_pp.mean(dim=1), maha_pp.mean(dim=1)
@@ -355,25 +322,14 @@ def aggregate_scores(loss_pp, maha_pp, top_k=None, mu_patch=None):
 
 
 def score_per_image(model, patches, top_k=None, mu_patch=None):
-    """Compute one score per image from its patches.
-    model: FastFlow model.
-    patches: (B, N, 3, P, P) tensor.
-    top_k: patches kept for the signed top-k aggregation (None = all).
-    mu_patch: validation patch-mean for the deviation center.
-    Returns: dict with 'loss' and 'mahalanobis' tensors of shape (B,).
-    """
+    """Compute one score per image from its patches."""
     loss_pp, maha_pp = _per_patch_scores(model, patches)
     loss, maha = aggregate_scores(loss_pp, maha_pp, top_k, mu_patch)
     return {"loss": loss, "mahalanobis": maha}
 
 
 def _collect_val_scores(model, val_dataloader, top_k=None):
-    """Collect per-image validation scores and the patch-mean.
-    model: FastFlow model.
-    val_dataloader: validation DataLoader (real images).
-    top_k: patches kept for the signed top-k aggregation (None = all).
-    Returns: (per-image losses numpy array, mu_patch float or None).
-    """
+    """Collect per-image validation scores and the patch-mean."""
     model.eval()
     device = model.nf_flows[0].parameters().__next__().device
     loss_pp_all, maha_pp_all = [], []
@@ -393,15 +349,7 @@ def _collect_val_scores(model, val_dataloader, top_k=None):
 
 
 def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
-    """Train the flow for one epoch (per-patch loss).
-    dataloader: training DataLoader yielding (B, K, 3, P, P) patches.
-    model: FastFlow model.
-    optimizer: optimizer.
-    epoch: zero-based epoch index.
-    args: parsed CLI args.
-    scheduler: optional LR scheduler stepped on the loss.
-    Returns: (train_mean, train_std, per-patch loss array).
-    """
+    """Train the flow for one epoch (per-patch loss)."""
     start_time = time.time()
     model.train()
     loss_meter = utils.AverageMeter()
@@ -442,15 +390,7 @@ def train_one_epoch(dataloader, model, optimizer, epoch, args, scheduler=None):
 
 
 def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto', alpha=0.1, top_k=None):
-    """Calibrate the anomaly threshold on the validation reals.
-    val_dataloader: validation DataLoader (real images).
-    model: FastFlow model.
-    use_lof: fit a Local Outlier Factor instead of a Gaussian band.
-    contamination: LOF contamination parameter.
-    alpha: target false-positive rate for the Gaussian band.
-    top_k: patches kept for the signed top-k aggregation (None = all).
-    Returns: dict with mean/std, band or lof, losses, mu_patch and top_k.
-    """
+    """Calibrate the anomaly threshold on the validation reals."""
     losses, mu_patch = _collect_val_scores(model, val_dataloader, top_k)
 
     if len(losses) == 0:
@@ -477,19 +417,7 @@ def compute_threshold(val_dataloader, model, use_lof=False, contamination='auto'
 
 def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx,
                            y_true_0_base, y_pred_0_base, preds_0_base, mu_val):
-    """Compute metrics for one fake class against a real baseline.
-    c: fake class id.
-    class_masks: dict {class_id: boolean mask}.
-    labels: integer labels for all samples.
-    preds: binary predictions for all samples.
-    preds_: continuous scores for all samples.
-    class2idx: mapping class id -> name.
-    y_true_0_base: labels of the baseline real class.
-    y_pred_0_base: binary predictions of the baseline real class.
-    preds_0_base: continuous scores of the baseline real class.
-    mu_val: validation real mean, fold center for the bilateral AP/ROC.
-    Returns: dict of per-class metrics, or None if the class is empty.
-    """
+    """Compute metrics for one fake class against a real baseline."""
     mask_c  = class_masks[c]
     y_pred_c = preds[mask_c]
     preds_c  = preds_[mask_c]
@@ -538,16 +466,7 @@ def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx,
 
 def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None,
               wandb_log=False, wandb_prefix: str = ""):
-    """Score the test set and compute all metrics.
-    dataloader: test DataLoader yielding (patches, label).
-    model: FastFlow model.
-    epoch: zero-based epoch index, or None outside training.
-    class2idx: mapping class id -> name.
-    threshold_info: calibration dict from compute_threshold.
-    wandb_log: log metrics to Weights & Biases.
-    wandb_prefix: prefix prepended to W&B keys.
-    Returns: (mean_roc, per-image scores, labels, metrics_summary).
-    """
+    """Score the test set and compute all metrics."""
     inference_start_time = time.time()
     model.eval()
     labels_list = []
@@ -802,11 +721,7 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
 
 
 def train(args, config, canonical_checkpoint_dir):
-    """Run the full training loop with champion promotion.
-    args: parsed CLI args.
-    config: backbone config dict.
-    canonical_checkpoint_dir: champion folder for the best run.
-    """
+    """Run the full training loop with champion promotion."""
     checkpoint_dir = const.CHECKPOINT_DIR
     os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -939,6 +854,10 @@ def train(args, config, canonical_checkpoint_dir):
     if best_metric > canonical_best_metric:
         _promote_to_canonical(checkpoint_dir, canonical_checkpoint_dir)
         print(f"[champion] New champion!  {best_metric:.4f} > {canonical_best_metric:.4f}")
+        if args.auto_recalibrate:
+            _auto_recalibrate_champion(
+                model, val_dataloader, test_dataloader, class2idx,
+                canonical_checkpoint_dir, args.top_k, device)
     else:
         print(f"[champion] No promotion. Canonical remains at {canonical_best_metric:.4f}")
 
@@ -952,13 +871,10 @@ if __name__ == "__main__":
     pprint(config)
 
     canonical_run_name = f"{config['backbone_name']}_{const.real_tag(const.PATH_REAL)}_{config['pooling_type']}"
-    if args.use_lof:
-        canonical_run_name += "_lof"
-    else:
-        canonical_run_name += f"_t-alpha{args.alpha}"
 
     if args.run_name is None:
-        args.run_name = (canonical_run_name +
+        calib_tag = "_lof" if args.use_lof else f"_t-alpha{args.alpha}"
+        args.run_name = (canonical_run_name + calib_tag +
                          f"_np{args.num_train_patches}_lr{args.lr}_wd{args.weight_decay}_bs{args.batch_size}"
                          f"_ld{args.lr_decay}_lp{args.lr_patience}")
         if args.top_k:

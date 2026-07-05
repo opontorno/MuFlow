@@ -15,12 +15,7 @@ CSV_PATH = os.path.join(c.WORKING_DIR, 'data', 'dataset_split_rand.csv')
 
 
 def filter_files_by_csv_split(image_files, is_train, is_val=False):
-    """Keep only the files belonging to the requested CSV split.
-    image_files: array of file paths.
-    is_train: True for the train/val splits, False for the test split.
-    is_val: True selects 'val', False selects 'train' (only when is_train).
-    Returns: filtered array of file paths.
-    """
+    """Keep only the files belonging to the requested CSV split."""
     guidance = pd.read_csv(CSV_PATH)
     if is_train:
         split_name = 'val' if is_val else 'train'
@@ -47,20 +42,6 @@ class Dataset:
     norm_mean=None,
     norm_std=None,
     ):
-        """
-        real_paths: list of glob patterns for the real (class 0) images.
-        fake_paths: list of glob patterns for the fake images (test only).
-        input_size: patch side.
-        is_train: build the train/val dataset if True, else the test dataset.
-        is_val: select the validation split (only meaningful with is_train).
-        attack_type: robustness degradation applied at test time.
-        attack_params: parameters for the attack.
-        num_train_patches: random patches per training image.
-        num_repr_patches: deterministic patches per image at val/test.
-        debug: cap the training set to 100 samples.
-        norm_mean: normalization mean.
-        norm_std: normalization std.
-        """
         self.real_paths = real_paths
         self.fake_paths = fake_paths if fake_paths is not None else []
         self.is_train = is_train
@@ -75,9 +56,7 @@ class Dataset:
         self.norm_std = norm_std
 
     def create_dataset(self):
-        """Build and return the configured DeepFakeDataset.
-        Returns: DeepFakeDataset instance.
-        """
+        """Build and return the configured DeepFakeDataset."""
         if not self.is_train:
             print(f'Attack type: {self.attack_type}')
             if self.attack_type != 'none':
@@ -104,21 +83,6 @@ class DeepFakeDataset(Dataset):
                  attack_type='none', attack_params=None, seed=124,
                  num_train_patches=c.PATCH_NUM_TRAIN, num_repr_patches=c.PATCH_NUM_REPR,
                  debug=False, norm_mean=None, norm_std=None):
-        """
-        real_paths: list of glob patterns for the real (class 0) images.
-        fake_paths: list of glob patterns for the fake images (test only).
-        input_size: patch side (no resize is applied).
-        is_train: train/val mode if True, test mode otherwise.
-        is_val: select the validation split.
-        attack_type: test-time degradation.
-        attack_params: parameters for the attack.
-        seed: RNG seed for shuffling and balancing.
-        num_train_patches: random patches per training image.
-        num_repr_patches: deterministic patches per image at val/test.
-        debug: cap the training set to 100 samples.
-        norm_mean: normalization mean.
-        norm_std: normalization std.
-        """
         self.debug = debug
         self.is_train = is_train
         self.is_val = is_val
@@ -185,10 +149,7 @@ class DeepFakeDataset(Dataset):
             self.labels = self.labels[:100]
 
     def _patches(self, image):
-        """Extract and transform the patches representing one image.
-        image: PIL.Image.
-        Returns: (k, 3, P, P) tensor — random patches for train, deterministic otherwise.
-        """
+        """Extract and transform the patches representing one image."""
         if self.is_train and not self.is_val:
             plist = random_patches(image, self.P, self.num_train_patches)
         else:
@@ -196,10 +157,7 @@ class DeepFakeDataset(Dataset):
         return torch.stack([self.transform(p).float() for p in plist])
 
     def __getitem__(self, index):
-        """Return one dataset item.
-        index: sample index.
-        Returns: (k, 3, P, P) patches for train/val, or (patches, label) for test.
-        """
+        """Return one dataset item."""
         image_file = self.image_files[index]
         label = self.labels[index]
 

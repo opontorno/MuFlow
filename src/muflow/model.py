@@ -11,12 +11,7 @@ import numpy as np
 
 
 def build_backbone(model_name: str, config: dict, device=None):
-    """Build a frozen backbone for feature extraction.
-    model_name: backbone identifier.
-    config: backbone config dict (uses 'out_indices', 'input_size', 'backbone_name').
-    device: torch device, or None to auto-select CUDA/CPU.
-    Returns: (backbone, backbone_type, out_indices, device).
-    """
+    """Build a frozen backbone for feature extraction."""
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -55,10 +50,6 @@ def build_backbone(model_name: str, config: dict, device=None):
 
 class CLIPVisualExtractor(nn.Module):
     def __init__(self, backbone_name: str, out_block_indices: list):
-        """
-        backbone_name: CLIP backbone identifier.
-        out_block_indices: transformer block indices whose feature maps to return.
-        """
         super().__init__()
         try:
             import clip as openai_clip
@@ -78,10 +69,7 @@ class CLIPVisualExtractor(nn.Module):
             param.requires_grad = False
 
     def forward(self, x: torch.Tensor) -> list:
-        """Extract CLIP spatial feature maps.
-        x: (B, 3, H, W) tensor, already CLIP-normalized.
-        Returns: list of (B, C, Hf, Wf) tensors, one per requested block.
-        """
+        """Extract CLIP spatial feature maps."""
         v = self.visual
         B = x.shape[0]
 
@@ -106,14 +94,7 @@ class CLIPVisualExtractor(nn.Module):
 
 
 def gaussian_nll_loss(output, mu, cov, log_jac_det, pooling_type='mean'):
-    """Gaussian negative log-likelihood of flow outputs under a GMM component.
-    output: (B, d) pooled flow output.
-    mu: GMM mean.
-    cov: GMM covariance.
-    log_jac_det: flow log-determinant of the Jacobian.
-    pooling_type: when 'flatten', applies log1p to the loss.
-    Returns: (loss, mahalanobis) tensors of shape (B,).
-    """
+    """Gaussian negative log-likelihood of flow outputs under a GMM component."""
     B, d = output.shape
 
     cov_inv = torch.linalg.inv(cov)
@@ -128,11 +109,7 @@ def gaussian_nll_loss(output, mu, cov, log_jac_det, pooling_type='mean'):
 
 
 def subnet_conv_func(kernel_size, hidden_ratio):
-    """Build a subnet constructor for FrEIA coupling blocks.
-    kernel_size: convolution kernel size.
-    hidden_ratio: hidden channels as a fraction of input channels.
-    Returns: a function (in_channels, out_channels) -> nn.Sequential.
-    """
+    """Build a subnet constructor for FrEIA coupling blocks."""
     def subnet_conv(in_channels, out_channels):
         hidden_channels = int(in_channels * hidden_ratio)
         return nn.Sequential(
@@ -145,14 +122,7 @@ def subnet_conv_func(kernel_size, hidden_ratio):
 
 
 def nf_fast_flow(input_chw, conv3x3_only, hidden_ratio, flow_steps, clamp=2.0):
-    """Build a FastFlow normalizing-flow module for one feature scale.
-    input_chw: (C, H, W) of the input feature map.
-    conv3x3_only: use only 3x3 kernels if True, else alternate 1x1/3x3.
-    hidden_ratio: subnet hidden-channel ratio.
-    flow_steps: number of coupling steps.
-    clamp: affine clamping value.
-    Returns: FrEIA SequenceINN module.
-    """
+    """Build a FastFlow normalizing-flow module for one feature scale."""
     nodes = Ff.SequenceINN(*input_chw)
     for i in range(flow_steps):
         if i % 2 == 1 and not conv3x3_only:
@@ -182,18 +152,6 @@ class FastFlow(nn.Module):
         out_indices=[1, 2, 3],
         pooling_type='mean',
     ):
-        """
-        backbone_name: backbone identifier.
-        flow_steps: coupling steps per flow.
-        input_size: patch side.
-        backbone_weights: optional checkpoint for CNN backbone weights.
-        conv3x3_only: restrict flows to 3x3 kernels.
-        hidden_ratio: subnet hidden-channel ratio.
-        gmm_values: dict with the fitted GMM means/covariances per layer.
-        in_channels: input channels.
-        out_indices: backbone layer/block indices to extract.
-        pooling_type: spatial pooling applied to flow outputs.
-        """
         super(FastFlow, self).__init__()
         assert (
             backbone_name in const.SUPPORTED_BACKBONES
@@ -286,10 +244,7 @@ class FastFlow(nn.Module):
             self.covs.append(gmm_values[i][1])
 
     def process_features(self, features):
-        """Run features through the flows and score them against the GMM.
-        features: list of (B, C, H, W) feature maps, one per layer.
-        Returns: dict with 'loss' and 'mahalanobis' tensors of shape (B,).
-        """
+        """Run features through the flows and score them against the GMM."""
         loss = []
         mahalanobis = []
         for i, feature in enumerate(features):
@@ -323,10 +278,7 @@ class FastFlow(nn.Module):
         return result
 
     def predict(self, image) -> dict:
-        """Single-image inference (mean NLL over deterministic patches).
-        image: PIL.Image or HxWx3 uint8 numpy array.
-        Returns: dict with 'loss' (anomaly score) and 'mahalanobis' floats.
-        """
+        """Single-image inference (mean NLL over deterministic patches)."""
         from PIL import Image as _PIL
         from muflow.patch_utils import make_patch_transform, repr_patches
 
@@ -354,10 +306,7 @@ class FastFlow(nn.Module):
         }
 
     def forward(self, x):
-        """Forward pass: backbone features → flows → GMM scoring.
-        x: (B, 3, P, P) patch tensor.
-        Returns: dict with 'loss' and 'mahalanobis' tensors of shape (B,).
-        """
+        """Forward pass: backbone features → flows → GMM scoring."""
         self.feature_extractor.eval()
 
         if self.backbone_type == 'cait_deit':

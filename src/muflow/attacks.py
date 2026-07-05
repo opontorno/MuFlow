@@ -8,20 +8,11 @@ from PIL import Image
 
 class RobustnessAttacks:
     def __init__(self, attack_type='none', **attack_params):
-        """
-        attack_type: one of 'none', 'jpeg', 'gaussian_blur', 'rotation',
-                     'gaussian_noise', 'salt_pepper', 'resize', 'crop',
-                     'random_crop', 'horizontal_flip'.
-        attack_params: keyword parameters specific to the chosen attack.
-        """
         self.attack_type = attack_type
         self.attack_params = attack_params
 
     def apply(self, image):
-        """Apply the configured attack to an image.
-        image: input PIL.Image.
-        Returns: degraded PIL.Image (unchanged if attack_type is 'none').
-        """
+        """Apply the configured attack to an image."""
         if self.attack_type == 'none':
             return image
         elif self.attack_type == 'jpeg':
@@ -46,10 +37,7 @@ class RobustnessAttacks:
             raise ValueError(f"Unknown attack type: {self.attack_type}")
 
     def jpeg_compression(self, image):
-        """JPEG-recompress an image.
-        image: input PIL.Image.
-        Returns: PIL.Image recompressed at attack_params['quality'] (default 75).
-        """
+        """JPEG-recompress an image."""
         quality = self.attack_params.get('quality', 75)
         if isinstance(image, Image.Image):
             buffer = io.BytesIO()
@@ -60,10 +48,7 @@ class RobustnessAttacks:
             raise ValueError("JPEG compression requires PIL Image")
 
     def gaussian_blur(self, image):
-        """Gaussian-blur an image.
-        image: input PIL.Image.
-        Returns: PIL.Image blurred with attack_params['kernel_size'] and ['sigma'].
-        """
+        """Gaussian-blur an image."""
         kernel_size = self.attack_params.get('kernel_size', 5)
         sigma = self.attack_params.get('sigma', 1.0)
         if isinstance(image, Image.Image):
@@ -74,10 +59,7 @@ class RobustnessAttacks:
             raise ValueError("Gaussian blur requires PIL Image")
 
     def rotation(self, image):
-        """Rotate an image.
-        image: input PIL.Image.
-        Returns: PIL.Image rotated by attack_params['angle'] (default 10°).
-        """
+        """Rotate an image."""
         angle = self.attack_params.get('angle', 10)
         if isinstance(image, Image.Image):
             return image.rotate(angle, resample=Image.BILINEAR, expand=False)
@@ -85,10 +67,7 @@ class RobustnessAttacks:
             raise ValueError("Rotation requires PIL Image")
 
     def gaussian_noise(self, image):
-        """Add Gaussian noise to an image.
-        image: input PIL.Image.
-        Returns: PIL.Image with noise of attack_params['mean'] and ['std'].
-        """
+        """Add Gaussian noise to an image."""
         mean = self.attack_params.get('mean', 0)
         std = self.attack_params.get('std', 0.1)
         if isinstance(image, Image.Image):
@@ -100,10 +79,7 @@ class RobustnessAttacks:
             raise ValueError("Gaussian noise requires PIL Image")
 
     def salt_pepper_noise(self, image):
-        """Add salt-and-pepper noise to an image.
-        image: input PIL.Image.
-        Returns: PIL.Image corrupted with attack_params['amount'] of pixels.
-        """
+        """Add salt-and-pepper noise to an image."""
         amount = self.attack_params.get('amount', 0.05)
         if isinstance(image, Image.Image):
             img_array = np.array(image)
@@ -118,10 +94,7 @@ class RobustnessAttacks:
             raise ValueError("Salt-pepper noise requires PIL Image")
 
     def resize_attack(self, image):
-        """Down- then up-scale an image to lose high-frequency detail.
-        image: input PIL.Image.
-        Returns: PIL.Image at original size, via attack_params['scale_factor'].
-        """
+        """Down- then up-scale an image to lose high-frequency detail."""
         scale_factor = self.attack_params.get('scale_factor', 0.5)
         if isinstance(image, Image.Image):
             orig_size = image.size
@@ -132,10 +105,7 @@ class RobustnessAttacks:
             raise ValueError("Resize attack requires PIL Image")
 
     def center_crop(self, image):
-        """Center-crop then resize back to original size.
-        image: input PIL.Image.
-        Returns: PIL.Image cropped by attack_params['crop_ratio'] (default 0.8).
-        """
+        """Center-crop then resize back to original size."""
         crop_ratio = self.attack_params.get('crop_ratio', 0.8)
         if isinstance(image, Image.Image):
             width, height = image.size
@@ -151,10 +121,7 @@ class RobustnessAttacks:
             raise ValueError("Center crop requires PIL Image")
 
     def random_crop(self, image):
-        """Random-crop then resize back to original size.
-        image: input PIL.Image.
-        Returns: PIL.Image cropped by attack_params['crop_ratio'] (default 0.9).
-        """
+        """Random-crop then resize back to original size."""
         crop_ratio = self.attack_params.get('crop_ratio', 0.9)
         if isinstance(image, Image.Image):
             width, height = image.size
@@ -168,10 +135,7 @@ class RobustnessAttacks:
             raise ValueError("Random crop requires PIL Image")
 
     def horizontal_flip(self, image):
-        """Horizontally flip an image.
-        image: input PIL.Image.
-        Returns: flipped PIL.Image.
-        """
+        """Horizontally flip an image."""
         if isinstance(image, Image.Image):
             return image.transpose(Image.FLIP_LEFT_RIGHT)
         else:

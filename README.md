@@ -31,19 +31,17 @@ score.
 ```
 MuFlow/
 ├── main.py                     # training entry point
-├── eval.py                     # evaluation (incl. robustness attacks & custom dirs)
+├── eval.py                     # evaluation (robustness attacks & custom dirs)
 ├── configs/                    # one YAML per model config
-├── data/                       # split CSV is generated here (see Step 0)
-├── scripts/
-│   ├── generate_csv.py         # build the train/val/test split
-│   ├── generate_means.py       # compute average images
-│   └── generate_parameters.py  # fit the GMM
+├── data/                       # split CSV lives here
+├── scripts/                    # dataset & GMM preparation
 └── src/muflow/
     ├── model.py                # FastFlow model & backbone builder
     ├── dataset.py              # data loading & transforms
     ├── patch_utils.py          # native-patch sampling & feature extraction
-    ├── attacks.py              # content-preserving degradations (robustness)
-    ├── constants.py            # paths, dataset globs & normalisation stats
+    ├── calibration.py          # threshold calibration & sweep
+    ├── attacks.py              # content-preserving degradations
+    ├── constants.py            # dataset globs & normalisation stats
     └── gpu_utils.py            # automatic GPU selection
 ```
 
@@ -51,54 +49,51 @@ MuFlow/
 
 ## Installation
 
-Requires **Python ≥ 3.12** and a CUDA-capable GPU (CPU works but is slow).
+Requires **Python ≥ 3.12** and a CUDA-capable GPU.
 
 ```bash
 git clone https://github.com/opontorno/MuFlow.git
 cd MuFlow
 
-# (recommended) create an environment
 conda create -n muflow python=3.12 -y
 conda activate muflow
 
-# install the package and its dependencies
 pip install -e .
 ```
 
 ---
 
-## Configuring paths
+## Configuring the datasets
 
-All paths are read from `src/muflow/constants.py` and can be overridden with environment variables
-— **no need to edit the source**:
-
-| Variable                | Meaning                          | Default        |
-|-------------------------|----------------------------------|----------------|
-| `MUFLOW_DATA_DIR`       | Root of your datasets            | *(set this!)*  |
-| `MUFLOW_WORKING_DIR`    | Repo root                        | auto-detected  |
-| `MUFLOW_CHECKPOINT_DIR` | Where training runs are written  | `logs/`        |
+Point µFlow at your data root, either by exporting `MUFLOW_DATA_DIR` or editing
+`src/muflow/constants.py`:
 
 ```bash
 export MUFLOW_DATA_DIR=/path/to/your/data
 ```
 
-### Expected data layout
+The real and fake sources are glob patterns in `src/muflow/constants.py`:
+
+- `PATH_REAL` — real images used for training, validation and calibration.
+- `PATH_REAL_OOD` — real images used as the baseline at test time (set to `None` to reuse `PATH_REAL`).
+- `PATH_FAKE` — list of globs for the fake generators (test only).
+
+Expected layout:
 
 ```
 $MUFLOW_DATA_DIR/
 ├── datasets/
 │   ├── ffhq/<sub>/*.png                        # real — training source
-│   ├── celeba_hq/{train,val}/<sub>/*.jpg       # real — OOD real at test time
-│   ├── WILD/{Closed_Set,Open_Set}/<gen>/*.png  # fake generators (test)
-│   └── datasets_DFX/<gen>/*.png                # additional fake generators (test)
-└── datasets_means/<mean_size>/<source>/*.png   # average images (see Step 1)
+│   ├── celeba_hq/{train,val}/<sub>/*.jpg       # real — test-time baseline
+│   ├── WILD/{Closed_Set,Open_Set}/<gen>/*.png  # fake generators
+│   └── other_sources/<gen>/*.png                # fake generators
+└── datasets_means/<mean_size>/<source>/*.png   # average images
 
-MuFlow/data/dataset_split_rand.csv              # train/val/test split (see Step 0)
+MuFlow/data/dataset_split_rand.csv              # train/val/test split
 ```
 
-You can point µFlow at **your own** datasets: any folder of real face images works as the training
-source, and any folder of generators works as the test set — adjust the globs in
-`src/muflow/dataset.py` accordingly.
+Any folder of real faces works as the training source and any folder of generators as the test
+set — adjust the globs in `constants.py` accordingly.
 
 ---
 
@@ -106,9 +101,7 @@ source, and any folder of generators works as the test set — adjust the globs 
 
 ### Step 0 — Build the split CSV
 
-The dataset is indexed by a CSV (`data/dataset_split_rand.csv`, columns `path,split`). The script
-auto-discovers every WILD generator (`Closed_Set` + `Open_Set`) and the DFX generators, caps each
-fake generator to 1000 images and produces a per-class 70/15/15 split:
+The dataset is indexed by a CSV (`data/dataset_split_rand.csv`, columns `path,split`):
 
 ```bash
 python scripts/generate_csv.py
@@ -116,51 +109,30 @@ python scripts/generate_csv.py
 
 ### Step 1 — Compute average images
 
-For training you only need the averages of your **real** dataset. Edit `INPUT_GLOB` at the top of
-`scripts/generate_means.py`, then run:
+Compute the average images of the real source (taken from `PATH_REAL` by default):
 
 ```bash
-# e.g. INPUT_GLOB = "$MUFLOW_DATA_DIR/datasets/ffhq/**/*.png"
-python scripts/generate_means.py --name ffhq --mean-size 500 --num-images 1000
+python scripts/generate_means.py
 ```
 
-This writes `datasets_means/500/ffhq/*.png` (each image is the average of 500 random reals).
+Pass `--input <glob> --name <folder>` to average a different source.
 
 ### Step 2 — Fit the GMM
 
 ```bash
-python scripts/generate_parameters.py --model_name resnet50 --reals ffhq
+python scripts/generate_parameters.py --model_name clip_vitl14
 ```
 
-**You can skip this step**: `main.py` runs it automatically if the parameters file is missing.
+This step is optional: `main.py` runs it automatically if the parameters file is missing.
 
 ### Step 3 — Train
 
 ```bash
-python main.py --config configs/resnet50.yaml
+python main.py --config configs/clip_vitl14.yaml
 ```
-
-The real/fake sources are configured in `src/muflow/constants.py` via `PATH_REAL`
-(train/val + calibration), `PATH_REAL_OOD` (real used at test time; falls back to
-`PATH_REAL` when `None`) and `PATH_FAKE` (list of fake globs).
-
-Useful flags:
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--config` | model config YAML (pick one from `configs/`) | `configs/resnet50.yaml` |
-| `--top_k` | signed-mean over the `top_k` most deviant patches (`None`/`0` = all) | `None` |
-| `--use_lof` | calibrate with Local Outlier Factor instead of a threshold band | off |
-| `--batch_size`, `--lr`, `--num_epochs` | optimisation | `32`, `1e-4`, `1000` |
-| `--alpha` | target false-positive rate for the threshold | `0.1` |
-| `--gpu_id` | force a GPU (default: auto-select the freest) | auto |
-| `--wandb` | `online` / `offline` / `disabled` | `online` |
-| `--wandb_entity`, `--wandb_project` | W&B destination | your default / `MuFlow` |
 
 Each run writes a checkpoint (`best.pt`), the calibrated thresholds, predictions and a metrics
 JSON to `$MUFLOW_CHECKPOINT_DIR/<run_name>/`.
-
-> Tip: pass `--wandb disabled` to run without Weights & Biases.
 
 ---
 
@@ -170,15 +142,15 @@ JSON to `$MUFLOW_CHECKPOINT_DIR/<run_name>/`.
 python eval.py --run_dir logs/<run_name>
 ```
 
-All settings are loaded from the run's `run_config.yaml`. You can also evaluate on custom folders:
+Settings are loaded from the run's `run_config.yaml`. You can also evaluate on custom folders:
 
 ```bash
 python eval.py --run_dir logs/<run> \
     --custom_dirs /path/reals /path/fakes --custom_labels 0 1
 ```
 
-Robustness to degradations (JPEG, blur, Gaussian/salt-&-pepper noise, resize, flip, …) can be
-toggled in the `attacks_configs` list inside `eval.py`.
+Robustness degradations (JPEG, blur, noise, resize, flip, …) can be toggled in the
+`attacks_configs` list inside `eval.py`.
 
 ---
 
@@ -187,14 +159,11 @@ toggled in the `attacks_configs` list inside `eval.py`.
 If you find this work useful, please consider citing:
 
 ```bibtex
-@inproceedings{pontorno2026muflow,
-  title     = {{\textmu}Flow: Leveraging Average Images for Improving
-               Generalisation of Deepfake Faces Detectors},
-  author    = {Pontorno, Orazio and Litrico, Mattia and
-               Guarnera, Luca and Giuffrida, Valerio and
-               Battiato, Sebastiano},
-  booktitle = {Proceedings of the European Conference on Computer Vision (ECCV)},
-  year      = {2026},
+@article{pontorno2026mu,
+  title={$$\backslash$mu $ Flow: Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors},
+  author={Pontorno, Orazio and Litrico, Mattia and Guarnera, Luca and Giuffrida, Mario Valerio and Battiato, Sebastiano},
+  journal={arXiv preprint arXiv:2606.30528},
+  year={2026}
 }
 ```
 
@@ -203,9 +172,6 @@ If you find this work useful, please consider citing:
 ## Contact
 
 **Orazio Pontorno** — University of Catania — [orazio.pontorno@phd.unict.it](mailto:orazio.pontorno@phd.unict.it)
-
-For questions, issues or reproducibility requests, please open a
-[GitHub issue](https://github.com/opontorno/MuFlow/issues).
 
 ---
 

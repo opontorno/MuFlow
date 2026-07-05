@@ -3,9 +3,7 @@ import GPUtil
 
 
 def select_best_gpu():
-    """Return the id of the GPU with the most free memory.
-    Returns: int gpu id, 0 if none found by GPUtil, or None if no CUDA device.
-    """
+    """Return the id of the GPU with the most free memory."""
     if not torch.cuda.is_available():
         print("No CUDA GPUs available, using CPU")
         return None
@@ -20,10 +18,7 @@ def select_best_gpu():
 
 
 def resolve_device(gpu_id=None):
-    """Return a torch.device.
-    gpu_id: manual GPU id, or None to auto-select the freest GPU.
-    Returns: torch.device (CPU if no GPU is available).
-    """
+    """Return a torch.device."""
     if gpu_id is not None:
         print(f"📌 Using manually specified GPU {gpu_id}")
         return torch.device(f'cuda:{gpu_id}')

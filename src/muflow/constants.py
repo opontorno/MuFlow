@@ -10,18 +10,15 @@ PATH_REAL = [f"{DATA_DIR}/datasets/ffhq/**/*.*g"]
 PATH_REAL_OOD = [f"{DATA_DIR}/datasets/celeba_hq/**/*.*g"]
 PATH_FAKE = [
     f"{DATA_DIR}/datasets/WILD/**/*.*g",
-    f"{DATA_DIR}/datasets/datasets_DFX/**/*.*g",
+    f"{DATA_DIR}/datasets/other_sources/**/*.*g",
 ]
 
-SHOW_PER_CLASS = True
-SHOW_FAMILIES  = True
+SHOW_PER_CLASS = False
+SHOW_FAMILIES  = False
 
 
 def real_tag(path_globs):
-    """Derive a short real-source tag from a list of glob patterns.
-    path_globs: list of glob strings.
-    Returns: basename of the first glob's wildcard-free prefix.
-    """
+    """Derive a short real-source tag from a list of glob patterns."""
     head = path_globs[0].split("*")[0]
     return os.path.basename(head.rstrip("/"))
 
@@ -30,55 +27,21 @@ PATCH_NUM_TRAIN = 4
 PATCH_NUM_REPR  = 16
 PATCH_SEED      = 42
 
-BACKBONE_DEIT         = "deit_base_distilled_patch16_384"
-BACKBONE_CAIT         = "cait_m48_448"
-BACKBONE_RESNET18     = "resnet18"
 BACKBONE_RESNET50     = "resnet50"
-BACKBONE_RESNET101    = "resnet101"
-BACKBONE_WIDE_RESNET50= "wide_resnet50_2"
-BACKBONE_DENSENET121  = "densenet121"
 
-BACKBONE_DINOV2_VITS14 = "dinov2_vits14"
-BACKBONE_DINOV2_VITB14 = "dinov2_vitb14"
-BACKBONE_DINOV2_VITL14 = "dinov2_vitl14"
 
-DINO_TIMM_NAMES = {
-    BACKBONE_DINOV2_VITS14: "vit_small_patch14_dinov2.lvd142m",
-    BACKBONE_DINOV2_VITB14: "vit_base_patch14_dinov2.lvd142m",
-    BACKBONE_DINOV2_VITL14: "vit_large_patch14_dinov2.lvd142m",
-}
-DINO_CHANNELS = {
-    BACKBONE_DINOV2_VITS14: 384,
-    BACKBONE_DINOV2_VITB14: 768,
-    BACKBONE_DINOV2_VITL14: 1024,
-}
-DINO_PATCH_SIZE = {
-    BACKBONE_DINOV2_VITS14: 14,
-    BACKBONE_DINOV2_VITB14: 14,
-    BACKBONE_DINOV2_VITL14: 14,
-}
 DINO_MEAN = [0.485, 0.456, 0.406]
 DINO_STD  = [0.229, 0.224, 0.225]
 
-DINO_BACKBONES = [BACKBONE_DINOV2_VITS14, BACKBONE_DINOV2_VITB14, BACKBONE_DINOV2_VITL14]
-
-BACKBONE_CLIP_VITB32 = "clip_vitb32"
-BACKBONE_CLIP_VITB16 = "clip_vitb16"
 BACKBONE_CLIP_VITL14 = "clip_vitl14"
 
 CLIP_OPENAI_NAMES = {
-    BACKBONE_CLIP_VITB32: "ViT-B/32",
-    BACKBONE_CLIP_VITB16: "ViT-B/16",
     BACKBONE_CLIP_VITL14: "ViT-L/14",
 }
 CLIP_CHANNELS = {
-    BACKBONE_CLIP_VITB32: 768,
-    BACKBONE_CLIP_VITB16: 768,
     BACKBONE_CLIP_VITL14: 1024,
 }
 CLIP_PATCH_SIZE = {
-    BACKBONE_CLIP_VITB32: 32,
-    BACKBONE_CLIP_VITB16: 16,
     BACKBONE_CLIP_VITL14: 14,
 }
 CLIP_MEAN = [0.48145466, 0.4578275,  0.40821073]
@@ -87,26 +50,16 @@ CLIP_STD  = [0.26862954, 0.26130258, 0.27577711]
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 
-CLIP_BACKBONES = [BACKBONE_CLIP_VITB32, BACKBONE_CLIP_VITB16, BACKBONE_CLIP_VITL14]
+CLIP_BACKBONES = [BACKBONE_CLIP_VITL14]
 
 
 def get_norm_stats(backbone_name: str):
-    """Return the (mean, std) normalization stats for a backbone.
-    backbone_name: backbone identifier.
-    Returns: (mean, std) lists — CLIP stats for CLIP backbones, else ImageNet.
-    """
+    """Return the (mean, std) normalization stats for a backbone."""
     if backbone_name in CLIP_BACKBONES:
         return CLIP_MEAN, CLIP_STD
     return IMAGENET_MEAN, IMAGENET_STD
 
 SUPPORTED_BACKBONES = [
-    BACKBONE_DEIT,
-    BACKBONE_CAIT,
-    BACKBONE_RESNET18,
     BACKBONE_RESNET50,
-    BACKBONE_RESNET101,
-    BACKBONE_WIDE_RESNET50,
-    BACKBONE_DENSENET121,
-    *DINO_BACKBONES,
     *CLIP_BACKBONES,
 ]

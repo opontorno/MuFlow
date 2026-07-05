@@ -7,15 +7,13 @@ name = "muflow"
 version = "0.1.0"
 description = "Normalizing Flow based deepfake detection"
 authors = [
-  { name="opontorno", email="orazio.pontono@phd.unict.it" }
+  { name="Orazio Pontorno", email="orazio.pontorno@phd.unict.it" }
 ]
 requires-python = ">=3.12"
 dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     "timm>=0.9.0",
-    "clip @ git+https://github.com/openai/CLIP.git",
-    "FrEIA @ git+https://github.com/VLL-HD/FrEIA@1779d1fba1e21000fda1927b59eeac0a6fcaa284",
     "numpy>=1.24.0",
     "scipy>=1.10.0",
     "scikit-learn>=1.2.0",
@@ -29,6 +27,9 @@ dependencies = [
     "tqdm>=4.65.0",
     "opencv-python>=4.7.0",
     "gputil>=1.4.0",
+    # installed from git (not on PyPI), pinned for reproducibility:
+    "clip @ git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6",
+    "FrEIA @ git+https://github.com/VLL-HD/FrEIA.git@1779d1fba1e21000fda1927b59eeac0a6fcaa284",
 ]
 
 [tool.hatch.metadata]
@@ -41,6 +42,5 @@ packages = ["src/muflow"]
 include = [
     "src/muflow/",
     "pyproject.toml",
-    "requirements.txt",
     "README.md",
 ]
