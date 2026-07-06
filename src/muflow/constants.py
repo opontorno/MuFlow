@@ -3,7 +3,6 @@ import os
 _DEFAULT_WORKING_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 WORKING_DIR    = os.environ.get("MUFLOW_WORKING_DIR", _DEFAULT_WORKING_DIR)
-DATA_DIR       = os.environ.get("MUFLOW_DATA_DIR", "/media/orazio_mattia_group/ad4dd")
 CHECKPOINT_DIR = os.environ.get("MUFLOW_CHECKPOINT_DIR", "logs/")
 
 PATCH_NUM_TRAIN = 4

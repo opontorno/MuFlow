@@ -23,7 +23,7 @@ def get_args():
     p.add_argument("--mean-size", type=int, default=cfg.MEAN_SIZE)
     p.add_argument("--num-images", type=int, default=cfg.NUM_MEANS)
     p.add_argument("--resize", type=int, default=None)
-    p.add_argument("--output-root", type=str, default=os.path.join(const.DATA_DIR, "datasets_means"))
+    p.add_argument("--output-root", type=str, default=os.path.join(cfg.DATA_DIR, "datasets_means"))
     return p.parse_args()
 
 

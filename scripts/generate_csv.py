@@ -12,11 +12,7 @@ import config as cfg
 
 random.seed(42)
 
-ROOT = os.path.join(const.DATA_DIR, "datasets")
 output_file = os.path.join(const.WORKING_DIR, "data", "dataset_split_rand.csv")
-
-csv_data = []
-
 
 N_FAKE_PER_CLASS = cfg.FAKE_PER_CLASS
 R_TRAIN, R_VAL   = cfg.SPLIT[0], cfg.SPLIT[1]
@@ -25,7 +21,7 @@ R_TRAIN, R_VAL   = cfg.SPLIT[0], cfg.SPLIT[1]
 def split_by_class(pattern, label="class"):
     """Split files grouped by generator, capped per class, by the configured ratios."""
     files_by_class = defaultdict(list)
-    for f in glob.glob(pattern):
+    for f in glob.glob(pattern, recursive=True):
         files_by_class[f.split(os.sep)[-2]].append(f)
 
     print(f"{'='*60}\nProcessing {label} ({len(files_by_class)} classes)")
@@ -58,35 +54,17 @@ def split_random(pattern, label=""):
     return rows
 
 
-csv_data += split_random(
-    os.path.join(ROOT, "ffhq", "*", "*.png"),
-    label="FFHQ (reals)",
-)
+csv_data = []
 
-csv_data += split_by_class(
-    os.path.join(ROOT, "WILD", "*", "*", "*.png"),
-    label="WILD (Closed_Set + Open_Set)",
-)
+for pattern in cfg.PATH_REAL:
+    csv_data += split_random(pattern, label=f"Real ({pattern})")
 
-csv_data += split_by_class(
-    os.path.join(ROOT, "datasets_DFX", "*", "*.png"),
-    label="datasets_DFX",
-)
+if cfg.PATH_REAL_OOD and cfg.PATH_REAL_OOD != cfg.PATH_REAL:
+    for pattern in cfg.PATH_REAL_OOD:
+        csv_data += split_random(pattern, label=f"OOD real ({pattern})")
 
-print("=" * 60)
-print("Processing CelebA-HQ (OOD reals)")
-
-celeba_train = glob.glob(os.path.join(ROOT, "celeba_hq", "train", "*", "*.jpg"))
-random.shuffle(celeba_train)
-n_train_c = int(len(celeba_train) * 0.80)
-csv_data += [[f, "train"] for f in celeba_train[:n_train_c]]
-csv_data += [[f, "val"]   for f in celeba_train[n_train_c:]]
-
-celeba_test = glob.glob(os.path.join(ROOT, "celeba_hq", "val", "*", "*.jpg"))
-csv_data += [[f, "test"] for f in celeba_test]
-
-print(f"  train folder → train={n_train_c} / val={len(celeba_train)-n_train_c}")
-print(f"  val   folder → test={len(celeba_test)}")
+for pattern in cfg.PATH_FAKE:
+    csv_data += split_by_class(pattern, label=f"Fake ({pattern})")
 
 os.makedirs(os.path.dirname(output_file), exist_ok=True)
 with open(output_file, "w", newline="") as f:

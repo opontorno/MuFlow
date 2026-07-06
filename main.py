@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import norm
 
-from sklearn.metrics import accuracy_score, average_precision_score, roc_auc_score, roc_curve
+from sklearn.metrics import accuracy_score, average_precision_score, roc_auc_score
 from sklearn.neighbors import LocalOutlierFactor
 from joblib import Parallel, delayed
 
@@ -48,14 +48,13 @@ def _aggregate_by_family(results):
 
 def _print_family_summary(fam):
     """Print mean metrics overall and per family."""
-    keys = ['accuracy', 'acc_oracle', 'ap', 'roc']
+    keys = ['accuracy', 'ap', 'roc']
 
     def _m(rs, k): return np.mean([r[k] for r in rs])
 
     if not fam['all']:
         return
-    print(f"Mean Accuracy : {_m(fam['all'], 'accuracy'):.4f}"
-          f" (oracle={_m(fam['all'], 'acc_oracle'):.4f})")
+    print(f"Mean Accuracy : {_m(fam['all'], 'accuracy'):.4f}")
     print(f"Mean AP       : {_m(fam['all'], 'ap'):.4f}")
     print(f"Mean ROC AUC  : {_m(fam['all'], 'roc'):.4f}")
     print("--- by family ---")
@@ -63,7 +62,6 @@ def _print_family_summary(fam):
                        ('DM-Closed', 'dm_closed'), ('Mix', 'mix')]:
         if fam[key]:
             print(f"  {label:<10}: Acc={_m(fam[key], 'accuracy'):.4f}"
-                  f" (oracle={_m(fam[key], 'acc_oracle'):.4f})"
                   f"  AP={_m(fam[key], 'ap'):.4f}"
                   f"  ROC={_m(fam[key], 'roc'):.4f}")
 
@@ -71,11 +69,11 @@ def _print_family_summary(fam):
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True, help="path to the model config YAML")
+    parser.add_argument("--config", type=str, default="configs/clip_vitl14.yaml", help="path to the model config YAML")
     parser.add_argument("--checkpoint", type=str, help="checkpoint to resume from")
 
     parser.add_argument('--wandb', default='online', choices=['online', 'offline', 'disabled'])
-    parser.add_argument('--wandb_entity', type=str, default='orazio-mattia')
+    parser.add_argument('--wandb_entity', type=str, default='')
     parser.add_argument('--wandb_project', type=str, default='MuFlow')
 
     parser.add_argument('--num_train_patches', type=int, default=const.PATCH_NUM_TRAIN,
@@ -136,10 +134,10 @@ def _promote_to_canonical(temp_dir, canonical_dir):
 
 
 def _calibrate_champion(model, val_dataloader, test_dataloader, class2idx,
-                               canonical_checkpoint_dir, top_k, device):
+                        canonical_checkpoint_dir, top_k, device):
     """Sweep calibration candidates on the promoted champion, persist the best by real accuracy."""
     print("\n" + "=" * 64)
-    print("[auto-recalibrate] Sweeping calibration on the champion...")
+    print("[calibrate] Sweeping calibration on the champion...")
     print("=" * 64)
 
     champion_ckpt = torch.load(os.path.join(canonical_checkpoint_dir, "best.pt"), map_location=device)
@@ -432,21 +430,12 @@ def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx,
     y_true_binary   = np.concatenate([np.ones(min_len, dtype=np.int8),
                                       np.zeros(min_len, dtype=np.int8)])
 
-    _mu_real          = float(preds_0_base.mean())
-    _distances        = np.abs(scores_balanced - _mu_real)
-    _fpr_o, _tpr_o, _thr_o = roc_curve(y_true_binary, _distances)
-    _best_o           = np.argmax(_tpr_o - _fpr_o)
-    _preds_oracle     = (_distances >= _thr_o[_best_o]).astype(np.int8)
-
     scores_bilateral = np.abs(scores_balanced - mu_val)
 
     return {
         'class_id':          c, 'class_name': class_name, 'min_len': min_len,
         'loss_mean':         loss_mean_fake, 'loss_std': loss_std_fake,
         'accuracy':          accuracy_score(y_true_binary, y_pred_balanced),
-        'acc_oracle':        accuracy_score(y_true_binary, _preds_oracle),
-        'thr_oracle':        float(_thr_o[_best_o]),
-        'mu_oracle':         _mu_real,
         'ap':                average_precision_score(y_true_binary, scores_bilateral),
         'roc':               roc_auc_score(y_true_binary, scores_bilateral),
     }
@@ -563,30 +552,24 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         ) for c in classes_to_process
     )
 
-    accs_oracle = []
     for result in results:
         if result is None:
             continue
         if cfg.SHOW_PER_CLASS:
-            print(f"  > Class {result['class_name']} : \t Accuracy = {result['accuracy']:.4f} "
-                  f"(oracle={result['acc_oracle']:.4f} @[{result['mu_oracle']-result['thr_oracle']:.4f}, "
-                  f"{result['mu_oracle']+result['thr_oracle']:.4f}]), "
+            print(f"  > Class {result['class_name']} : \t Accuracy = {result['accuracy']:.4f}, "
                   f"\t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}, \t Loss = {result['loss_mean']:.4f}±{result['loss_std']:.4f}")
             print("-" * 30)
         per_class_metrics[f"loss_per_class/{result['class_name']}"]          = result['loss_mean']
         per_class_metrics[f"loss_std_per_class/{result['class_name']}"]      = result['loss_std']
         per_class_metrics[f"acc_per_class/{result['class_name']}"]           = result['accuracy']
-        per_class_metrics[f"acc_oracle_per_class/{result['class_name']}"]    = result['acc_oracle']
         per_class_metrics[f"ap_per_class/{result['class_name']}"]            = result['ap']
         per_class_metrics[f"roc_per_class/{result['class_name']}"]           = result['roc']
         aps.append(result['ap'])
         accs.append(result['accuracy'])
-        accs_oracle.append(result['acc_oracle'])
         rocs.append(result['roc'])
         cls.append(result['class_id'])
 
     mean_acc           = np.mean(accs)
-    mean_acc_oracle    = np.mean(accs_oracle)
     mean_ap            = np.mean(aps)
     mean_roc           = np.mean(rocs)
 
@@ -628,28 +611,20 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         ap_g   = average_precision_score(yt_g, sc_g_bi)
         roc_g  = roc_auc_score(yt_g, sc_g_bi)
 
-        _mu_g  = float(preds_0.mean())
-        _dist_g = np.abs(sc_g - _mu_g)
-        _fgo, _tgo, _thr_go = roc_curve(yt_g, _dist_g)
-        _ogo = np.argmax(_tgo - _fgo)
-        acc_oracle_g = accuracy_score(yt_g, (_dist_g >= _thr_go[_ogo]).astype(np.int8))
-
         print(f"\n{'=' * 30}")
         print(f"Global — Real vs All Fake")
-        print(f"  Acc={acc_g:.4f}  (oracle={acc_oracle_g:.4f})")
+        print(f"  Acc={acc_g:.4f}")
         print(f"  AP={ap_g:.4f}   ROC AUC={roc_g:.4f}")
         print(f"{'=' * 30}\n")
 
-        per_class_metrics["global/acc"]        = acc_g
-        per_class_metrics["global/acc_oracle"] = acc_oracle_g
-        per_class_metrics["global/ap"]         = ap_g
-        per_class_metrics["global/roc"]        = roc_g
+        per_class_metrics["global/acc"] = acc_g
+        per_class_metrics["global/ap"]  = ap_g
+        per_class_metrics["global/roc"] = roc_g
 
         global_metrics = {
             'n_balanced':    int(min_n),
             'n_fake_total':  int(len(preds_fake)),
             'acc':           float(round(acc_g, 6)),
-            'acc_oracle':    float(round(acc_oracle_g, 6)),
             'ap':            float(round(ap_g, 6)),
             'roc':           float(round(roc_g, 6)),
         }
@@ -672,7 +647,6 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         return {
             r['class_name']: {
                 'acc':           _r(r['accuracy']),
-                'acc_oracle':    _r(r['acc_oracle']),
                 'ap':            _r(r['ap']),
                 'roc':           _r(r['roc']),
                 'loss_mean':     _r(r['loss_mean'], 4),
@@ -683,11 +657,10 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
 
     metrics_summary = {
         'real': {
-            'mean_acc':           _r(mean_acc),
-            'mean_acc_oracle':    _r(mean_acc_oracle),
-            'mean_ap':            _r(mean_ap),
-            'mean_roc':           _r(mean_roc),
-            'per_class':          _per_class_dict(results),
+            'mean_acc':  _r(mean_acc),
+            'mean_ap':   _r(mean_ap),
+            'mean_roc':  _r(mean_roc),
+            'per_class': _per_class_dict(results),
         },
     }
     if global_metrics:

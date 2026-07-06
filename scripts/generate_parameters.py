@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config as cfg
 
 PREFIX = ""
-MEANS_DIR = os.path.join(const.DATA_DIR, "datasets_means", str(cfg.MEAN_SIZE))
+MEANS_DIR = os.path.join(cfg.DATA_DIR, "datasets_means", str(cfg.MEAN_SIZE))
 
 parser = argparse.ArgumentParser(description='Generate GMM parameters for FastFlow')
 parser.add_argument('-model', '--model_name', type=str, required=True)

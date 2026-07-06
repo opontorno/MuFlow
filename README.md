@@ -67,26 +67,31 @@ pip install -e .
 ## Configuring the datasets
 
 All dataset and reporting settings live in **`config.py`** at the repo root — adapt it to your
-data without touching the library. The core of it is three glob patterns; point them at **any**
-folders of images (there is no mandatory folder structure, the globs just have to match your files):
+data without touching the library. The core of it is three glob patterns, which you should edit to
+match **your own** folders and file names (there is no mandatory folder structure):
 
 ```python
-PATH_REAL     = [f"{const.DATA_DIR}/datasets/ffhq/**/*.*g"]        # train / val / calibration
-PATH_REAL_OOD = [f"{const.DATA_DIR}/datasets/celeba_hq/**/*.*g"]   # test baseline (None → reuse PATH_REAL)
-PATH_FAKE     = [f"{const.DATA_DIR}/datasets/WILD/**/*.*g", ...]    # fake generators (test only)
+PATH_REAL     = [f"{DATA_DIR}/datasets/ffhq/**/*.*g"]        # train / val / calibration
+PATH_REAL_OOD = [f"{DATA_DIR}/datasets/celeba_hq/**/*.*g"]   # test baseline (None → reuse PATH_REAL)
+PATH_FAKE     = [f"{DATA_DIR}/datasets/WILD/**/*.*g", ...]    # fake generators (test only)
 ```
 
-Point `MUFLOW_DATA_DIR` at your data root:
+`DATA_DIR` (also in `config.py`, overridable with `MUFLOW_DATA_DIR`) is only a convenience prefix
+for these globs:
 
 ```bash
 export MUFLOW_DATA_DIR=/path/to/your/data
 ```
 
+Exporting `MUFLOW_DATA_DIR` is enough **only if** your folders already match the layout below; for
+any other arrangement, edit the `PATH_*` globs in `config.py` directly to point at your files.
+
 `config.py` also holds the generator **families** (for the per-family report), the console
-**reporting** flags, and the dataset-**prep** knobs (mean size, per-class cap, split ratios).
+**reporting** flags, and the dataset-**prep** knobs (mean size, per-class cap, split ratios) — adjust
+the family names to match your own fake-generator folders.
 
 For reference, the layout **this project** uses is the following — but any other arrangement works
-just as well:
+just as well, as long as `config.py` points at it:
 
 ```
 $MUFLOW_DATA_DIR/
@@ -133,7 +138,7 @@ This step is optional: `main.py` runs it automatically if the parameters file is
 ### Step 3 — Train
 
 ```bash
-python main.py --config configs/clip_vitl14.yaml
+python main.py
 ```
 
 Each run writes a checkpoint (`best.pt`), the calibrated thresholds, predictions and a metrics
@@ -153,9 +158,6 @@ Settings are loaded from the run's `run_config.yaml`. You can also evaluate on c
 python eval.py --run_dir logs/<run> \
     --custom_dirs /path/reals /path/fakes --custom_labels 0 1
 ```
-
-Robustness degradations (JPEG, blur, noise, resize, flip, …) can be toggled in the
-`attacks_configs` list inside `eval.py`.
 
 ---
 

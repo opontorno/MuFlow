@@ -17,6 +17,10 @@ from muflow import constants as const
 from muflow.model import build_backbone
 from muflow.patch_utils import image_centroid
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config as cfg
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 PICTURES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pictures")
@@ -35,7 +39,7 @@ def get_args():
     p.add_argument("--model_name", type=str, default="resnet50",
                    help="Backbone name (must have a configs/<model_name>.yaml).")
     p.add_argument("--means-dir", type=str,
-                   default=os.path.join(const.DATA_DIR, "datasets_means", "500"),
+                   default=os.path.join(cfg.DATA_DIR, "datasets_means", str(cfg.MEAN_SIZE)),
                    help="Directory with one subfolder of average images per source.")
     p.add_argument("--num-patches", type=int, default=16,
                    help="Native patches averaged into one image centroid.")
