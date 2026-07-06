@@ -30,18 +30,19 @@ score.
 
 ```
 MuFlow/
+├── config.py                   # dataset, families & reporting configuration
 ├── main.py                     # training entry point
 ├── eval.py                     # evaluation (robustness attacks & custom dirs)
 ├── configs/                    # one YAML per model config
 ├── data/                       # split CSV lives here
 ├── scripts/                    # dataset & GMM preparation
-└── src/muflow/
+└── src/muflow/                 # the reusable library (model & method only)
     ├── model.py                # FastFlow model & backbone builder
     ├── dataset.py              # data loading & transforms
     ├── patch_utils.py          # native-patch sampling & feature extraction
     ├── calibration.py          # threshold calibration & sweep
     ├── attacks.py              # content-preserving degradations
-    ├── constants.py            # dataset globs & normalisation stats
+    ├── constants.py            # backbone & normalisation specs
     └── gpu_utils.py            # automatic GPU selection
 ```
 
@@ -65,19 +66,24 @@ pip install -e .
 
 ## Configuring the datasets
 
-µFlow reads its data through three glob patterns in `src/muflow/constants.py`. Point them at
-**any** folders of images — there is no mandatory folder structure, you only need to make these
-three globs match your files:
+All dataset and reporting settings live in **`config.py`** at the repo root — adapt it to your
+data without touching the library. The core of it is three glob patterns; point them at **any**
+folders of images (there is no mandatory folder structure, the globs just have to match your files):
 
-- `PATH_REAL` — real images for training, validation and calibration.
-- `PATH_REAL_OOD` — real images used as the baseline at test time (set to `None` to reuse `PATH_REAL`).
-- `PATH_FAKE` — list of globs for the fake generators (test only).
+```python
+PATH_REAL     = [f"{const.DATA_DIR}/datasets/ffhq/**/*.*g"]        # train / val / calibration
+PATH_REAL_OOD = [f"{const.DATA_DIR}/datasets/celeba_hq/**/*.*g"]   # test baseline (None → reuse PATH_REAL)
+PATH_FAKE     = [f"{const.DATA_DIR}/datasets/WILD/**/*.*g", ...]    # fake generators (test only)
+```
 
-Globs are rooted at `MUFLOW_DATA_DIR` (export it or edit `constants.py`):
+Point `MUFLOW_DATA_DIR` at your data root:
 
 ```bash
 export MUFLOW_DATA_DIR=/path/to/your/data
 ```
+
+`config.py` also holds the generator **families** (for the per-family report), the console
+**reporting** flags, and the dataset-**prep** knobs (mean size, per-class cap, split ratios).
 
 For reference, the layout **this project** uses is the following — but any other arrangement works
 just as well:
@@ -85,10 +91,10 @@ just as well:
 ```
 $MUFLOW_DATA_DIR/
 ├── datasets/
-│   ├── ffhq/<sub>/*.png                        # real — training source     (PATH_REAL)
-│   ├── celeba_hq/{train,val}/<sub>/*.jpg       # real — test-time baseline  (PATH_REAL_OOD)
-│   ├── WILD/{Closed_Set,Open_Set}/<gen>/*.png  # fake generators            (PATH_FAKE)
-│   └── other_sources/<gen>/*.png               # fake generators            (PATH_FAKE)
+│   ├── ffhq/<sub>/*.png                        # real — training source
+│   ├── celeba_hq/{train,val}/<sub>/*.jpg       # real — test-time baseline
+│   ├── WILD/{Closed_Set,Open_Set}/<gen>/*.png  # fake generators
+│   └── other_sources/<gen>/*.png               # fake generators
 └── datasets_means/<mean_size>/<source>/*.png   # average images
 
 MuFlow/data/dataset_split_rand.csv              # train/val/test split

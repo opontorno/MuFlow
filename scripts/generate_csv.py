@@ -6,6 +6,10 @@ import random
 
 from muflow import constants as const
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config as cfg
+
 random.seed(42)
 
 ROOT = os.path.join(const.DATA_DIR, "datasets")
@@ -14,11 +18,12 @@ output_file = os.path.join(const.WORKING_DIR, "data", "dataset_split_rand.csv")
 csv_data = []
 
 
-N_FAKE_PER_CLASS = 1000
+N_FAKE_PER_CLASS = cfg.FAKE_PER_CLASS
+R_TRAIN, R_VAL   = cfg.SPLIT[0], cfg.SPLIT[1]
 
 
 def split_by_class(pattern, label="class"):
-    """Split files grouped by generator, capped per class, into 70-15-15."""
+    """Split files grouped by generator, capped per class, by the configured ratios."""
     files_by_class = defaultdict(list)
     for f in glob.glob(pattern):
         files_by_class[f.split(os.sep)[-2]].append(f)
@@ -28,8 +33,8 @@ def split_by_class(pattern, label="class"):
     for cls, files in sorted(files_by_class.items()):
         random.shuffle(files)
         files = files[:N_FAKE_PER_CLASS]
-        n_train = int(len(files) * 0.70)
-        n_val   = int(len(files) * 0.15)
+        n_train = int(len(files) * R_TRAIN)
+        n_val   = int(len(files) * R_VAL)
         splits  = (["train"] * n_train
                  + ["val"]   * n_val
                  + ["test"]  * (len(files) - n_train - n_val))
@@ -40,11 +45,11 @@ def split_by_class(pattern, label="class"):
 
 
 def split_random(pattern, label=""):
-    """Split files into a random 70-15-15 split (no class grouping)."""
+    """Split files into a random split (no class grouping) by the configured ratios."""
     files = glob.glob(pattern, recursive=True)
     random.shuffle(files)
-    n_train = int(len(files) * 0.70)
-    n_val   = int(len(files) * 0.15)
+    n_train = int(len(files) * R_TRAIN)
+    n_val   = int(len(files) * R_VAL)
     rows = (  [[f, "train"] for f in files[:n_train]]
             + [[f, "val"]   for f in files[n_train:n_train + n_val]]
             + [[f, "test"]  for f in files[n_train + n_val:]])

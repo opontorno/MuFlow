@@ -8,16 +8,20 @@ from PIL import Image
 
 from muflow import constants as const
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config as cfg
+
 
 def get_args():
     """Parse command-line arguments."""
     p = argparse.ArgumentParser(description="Compute average images for the real source.")
-    p.add_argument("--input", nargs="+", default=const.PATH_REAL,
+    p.add_argument("--input", nargs="+", default=cfg.PATH_REAL,
                    help="glob(s) of images to average; defaults to PATH_REAL")
-    p.add_argument("--name", type=str, default=const.real_tag(const.PATH_REAL),
+    p.add_argument("--name", type=str, default=cfg.real_tag(cfg.PATH_REAL),
                    help="output subfolder name; defaults to the PATH_REAL tag")
-    p.add_argument("--mean-size", type=int, default=500)
-    p.add_argument("--num-images", type=int, default=1000)
+    p.add_argument("--mean-size", type=int, default=cfg.MEAN_SIZE)
+    p.add_argument("--num-images", type=int, default=cfg.NUM_MEANS)
     p.add_argument("--resize", type=int, default=None)
     p.add_argument("--output-root", type=str, default=os.path.join(const.DATA_DIR, "datasets_means"))
     return p.parse_args()

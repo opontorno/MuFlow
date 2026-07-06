@@ -17,18 +17,16 @@ from muflow import calibration
 from muflow.gpu_utils import resolve_device
 from muflow.patch_utils import make_patch_transform, repr_patches
 
+import config as cfg
+
 from main import (
     eval_once,
     score_per_image,
     _collect_val_scores,
-    _compute_class_metrics,
-    _aggregate_by_family,
-    _print_family_summary,
     build_model,
     compute_threshold,
     build_val_data_loader,
     build_test_data_loader,
-    GANS, DM_OPEN, DM_CLOSED, MIX_2CLASS,
 )
 
 
@@ -106,8 +104,8 @@ def create_dataloader(args, config, opt):
 
     norm_mean, norm_std = const.get_norm_stats(config["backbone_name"])
     test_dataset = dataset.Dataset(
-        real_paths=const.PATH_REAL_OOD if const.PATH_REAL_OOD else const.PATH_REAL,
-        fake_paths=const.PATH_FAKE,
+        real_paths=cfg.PATH_REAL_OOD if cfg.PATH_REAL_OOD else cfg.PATH_REAL,
+        fake_paths=cfg.PATH_FAKE,
         input_size=config["input_size"],
         is_train=False,
         is_val=False,
@@ -264,7 +262,8 @@ def eval_custom(dataloader, model, groups, threshold_info):
     print("=" * 50)
 
 
-def _maybe_promote_calibration(threshold_info: dict, metrics_summary: dict, args) -> None:
+def _maybe_promote_calibration(threshold_info: dict, metrics_summary: dict, args,
+                               preds=None, labels=None) -> None:
     """Compare an eval-time calibration override against the saved champion, promote if better."""
     if not (getattr(args, '_alpha_override', False) or getattr(args, '_top_k_override', False)):
         return
@@ -281,7 +280,8 @@ def _maybe_promote_calibration(threshold_info: dict, metrics_summary: dict, args
         }
         calibration.persist_calibration(
             threshold_info, cand, metrics_summary,
-            run_dir=args.run_dir, threshold_path=args.threshold_path, lof_checkpoint=args.lof_checkpoint)
+            run_dir=args.run_dir, threshold_path=args.threshold_path, lof_checkpoint=args.lof_checkpoint,
+            preds=preds, labels=labels)
         print(f"[champion] New champion calibration!  {new_acc:.4f} > {canonical_acc:.4f}")
     else:
         print(f"[champion] No promotion. Canonical remains at {canonical_acc:.4f}")
@@ -300,7 +300,7 @@ def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
           f"mean={val_losses.mean():.4f}  std={val_losses.std():.4f}")
 
     print("\nSweeping calibration candidates (clean test set)...")
-    best_cand, best_thr, best_metrics, best_real, rows = calibration.run_sweep(
+    best_cand, best_thr, best_metrics, best_real, best_preds, best_labels, rows = calibration.run_sweep(
         model, val_losses, mu_patch, top_k, test_dataloader, class2idx, eval_once)
     calibration.print_sweep_table(rows)
     print(f"\n  Winner: {best_cand['label']}  (Real Acc = {best_real:.4f})\n")
@@ -313,7 +313,8 @@ def _recalibrate_sweep(model, args, config, class2idx, test_dataloader):
 
     calibration.persist_calibration(
         best_thr, best_cand, best_metrics,
-        run_dir=args.run_dir, threshold_path=args.threshold_path, lof_checkpoint=args.lof_checkpoint)
+        run_dir=args.run_dir, threshold_path=args.threshold_path, lof_checkpoint=args.lof_checkpoint,
+        preds=best_preds, labels=best_labels)
 
     return best_thr
 
@@ -414,11 +415,11 @@ def evaluate(args):
         opt.attack_params = attack_params
         test_dataloader, class2idx = create_dataloader(args, config, opt)
 
-        _, _, _, metrics_summary = eval_once(
+        _, preds, labels, metrics_summary = eval_once(
             test_dataloader, model, class2idx=class2idx, threshold_info=threshold_info)
 
         if attack_type == 'none':
-            _maybe_promote_calibration(threshold_info, metrics_summary, args)
+            _maybe_promote_calibration(threshold_info, metrics_summary, args, preds, labels)
 
 
 if __name__ == "__main__":

@@ -41,6 +41,7 @@ packages = ["src/muflow"]
 [tool.hatch.build.targets.sdist]
 include = [
     "src/muflow/",
+    "configs/",
     "pyproject.toml",
     "README.md",
 ]

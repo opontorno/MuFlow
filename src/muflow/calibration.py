@@ -66,14 +66,14 @@ def run_sweep(model, val_losses, mu_patch, top_k, test_dataloader, class2idx, ev
     for cand in SWEEP_CANDIDATES:
         thr = fit_calibrator(val_losses, cand, mu_patch=mu_patch, top_k=top_k)
         with mute():
-            _, _, _, metrics = eval_once_fn(
+            _, preds, labels, metrics = eval_once_fn(
                 test_dataloader, model, class2idx=class2idx, threshold_info=thr, wandb_log=False)
-        rows.append((cand, thr, metrics, real_acc(metrics)))
+        rows.append((cand, thr, metrics, real_acc(metrics), preds, labels))
 
-    best_cand, best_thr, best_metrics, best_acc = max(
+    best_cand, best_thr, best_metrics, best_acc, best_preds, best_labels = max(
         rows, key=lambda x: (x[3], 0 if not x[0]['use_lof'] else -1)
     )
-    return best_cand, best_thr, best_metrics, best_acc, rows
+    return best_cand, best_thr, best_metrics, best_acc, best_preds, best_labels, rows
 
 
 def print_sweep_table(rows):
@@ -81,13 +81,14 @@ def print_sweep_table(rows):
     print(f"\n{'─'*64}")
     print(f"  {'Candidate':<36} {'Real Acc':>9}")
     print(f"{'─'*64}")
-    for cand, _, _, acc in rows:
+    for cand, _, _, acc, _, _ in rows:
         print(f"  {cand['label']:<36} {acc:>9.4f}")
     print(f"{'─'*64}")
 
 
 def persist_calibration(threshold_info: dict, cand: dict, metrics_summary: dict,
-                        run_dir: str, threshold_path: str, lof_checkpoint: str) -> None:
+                        run_dir: str, threshold_path: str, lof_checkpoint: str,
+                        preds=None, labels=None) -> None:
     """Persist the winning calibration to a run folder."""
     save_keys = ('l_threshold', 'u_threshold', 'threshold', 'losses', 'mean', 'std', 'mu_patch', 'top_k')
     np.savez(threshold_path,
@@ -101,11 +102,19 @@ def persist_calibration(threshold_info: dict, cand: dict, metrics_summary: dict,
     elif os.path.exists(lof_checkpoint):
         os.remove(lof_checkpoint)
 
+    if preds is not None:
+        np.save(os.path.join(run_dir, 'preds_best.npy'), preds)
+    if labels is not None:
+        np.save(os.path.join(run_dir, 'labels_best.npy'), labels)
+
     metrics_path = os.path.join(run_dir, 'best_metrics.json')
     if os.path.exists(metrics_path):
         with open(metrics_path) as f:
             payload = json.load(f)
         payload['metrics']     = metrics_summary
+        payload['reference_metric'] = round(
+            float(metrics_summary.get('real', {}).get('mean_roc',
+                  payload.get('reference_metric', 0.0))), 6)
         payload['calibration'] = {
             'method':        'lof' if cand['use_lof'] else 'gaussian',
             'alpha':         cand['alpha'],

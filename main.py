@@ -19,6 +19,8 @@ from muflow import utils
 from muflow import calibration
 from muflow.gpu_utils import resolve_device
 
+import config as cfg
+
 import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
@@ -27,13 +29,6 @@ from scipy.stats import norm
 from sklearn.metrics import accuracy_score, average_precision_score, roc_auc_score, roc_curve
 from sklearn.neighbors import LocalOutlierFactor
 from joblib import Parallel, delayed
-
-GANS      = {'StyleGAN', 'StyleGAN2', 'StyleGAN3', 'STARGAN', 'AttGAN', 'GDWCT'}
-DM_OPEN   = {'Flux.1', 'Stable DIffusion 3.5', 'Stable Diffusion XL',
-             'Stable Cascade', 'Stable Diffusion Attend and Excite'}
-DM_CLOSED = {'Dall-E 3', 'Midjourney', 'Starry AI', 'Deep AI', 'Hotpot AI',
-             'Nvidia Sana PAG', 'Tencent Hunyuan', 'Flux.1.1 Pro'}
-MIX_2CLASS = {'STARGAN', 'StyleGAN2', 'Stable DIffusion 3.5', 'Flux.1.1 Pro'}
 
 
 def _aggregate_by_family(results):
@@ -44,24 +39,23 @@ def _aggregate_by_family(results):
             continue
         n = r['class_name']
         fam['all'].append(r)
-        if n in GANS:       fam['gan'].append(r)
-        if n in DM_OPEN:    fam['dm_open'].append(r)
-        if n in DM_CLOSED:  fam['dm_closed'].append(r)
-        if n in MIX_2CLASS: fam['mix'].append(r)
+        if n in cfg.GANS:       fam['gan'].append(r)
+        if n in cfg.DM_OPEN:    fam['dm_open'].append(r)
+        if n in cfg.DM_CLOSED:  fam['dm_closed'].append(r)
+        if n in cfg.MIX_2CLASS: fam['mix'].append(r)
     return fam
 
 
 def _print_family_summary(fam):
     """Print mean metrics overall and per family."""
-    keys = ['accuracy', 'acc_oracle', 'acc_oracle_bi', 'ap', 'roc']
+    keys = ['accuracy', 'acc_oracle', 'ap', 'roc']
 
     def _m(rs, k): return np.mean([r[k] for r in rs])
 
     if not fam['all']:
         return
     print(f"Mean Accuracy : {_m(fam['all'], 'accuracy'):.4f}"
-          f" (oracle={_m(fam['all'], 'acc_oracle'):.4f},"
-          f" bi={_m(fam['all'], 'acc_oracle_bi'):.4f})")
+          f" (oracle={_m(fam['all'], 'acc_oracle'):.4f})")
     print(f"Mean AP       : {_m(fam['all'], 'ap'):.4f}")
     print(f"Mean ROC AUC  : {_m(fam['all'], 'roc'):.4f}")
     print("--- by family ---")
@@ -69,8 +63,7 @@ def _print_family_summary(fam):
                        ('DM-Closed', 'dm_closed'), ('Mix', 'mix')]:
         if fam[key]:
             print(f"  {label:<10}: Acc={_m(fam[key], 'accuracy'):.4f}"
-                  f" (oracle={_m(fam[key], 'acc_oracle'):.4f},"
-                  f" bi={_m(fam[key], 'acc_oracle_bi'):.4f})"
+                  f" (oracle={_m(fam[key], 'acc_oracle'):.4f})"
                   f"  AP={_m(fam[key], 'ap'):.4f}"
                   f"  ROC={_m(fam[key], 'roc'):.4f}")
 
@@ -111,7 +104,7 @@ def parse_args():
     parser.add_argument('--alpha', type=float, default=0.1, help="target false-positive rate for the threshold band")
     parser.add_argument('--use_lof', action='store_true', default=False, help="calibrate with LOF instead of a band")
     parser.add_argument('--contamination', default='auto')
-    parser.add_argument('--auto_recalibrate', action='store_true', default=True,
+    parser.add_argument('--calibrate', action='store_true', default=True,
                         help="recalibrate the champion threshold after promotion")
 
     parser.add_argument('-patience', '--early_stopping_patience', type=float, default=50)
@@ -142,7 +135,7 @@ def _promote_to_canonical(temp_dir, canonical_dir):
     print(f"[champion] Promoted → {canonical_dir}")
 
 
-def _auto_recalibrate_champion(model, val_dataloader, test_dataloader, class2idx,
+def _calibrate_champion(model, val_dataloader, test_dataloader, class2idx,
                                canonical_checkpoint_dir, top_k, device):
     """Sweep calibration candidates on the promoted champion, persist the best by real accuracy."""
     print("\n" + "=" * 64)
@@ -158,7 +151,7 @@ def _auto_recalibrate_champion(model, val_dataloader, test_dataloader, class2idx
           f"mean={val_losses.mean():.4f}  std={val_losses.std():.4f}")
 
     print("\nSweeping calibration candidates (clean test set)...")
-    best_cand, best_thr, best_metrics, best_real, rows = calibration.run_sweep(
+    best_cand, best_thr, best_metrics, best_real, best_preds, best_labels, rows = calibration.run_sweep(
         model, val_losses, mu_patch, top_k, test_dataloader, class2idx, eval_once)
     calibration.print_sweep_table(rows)
     print(f"\n  Winner: {best_cand['label']}  (Real Acc = {best_real:.4f})\n")
@@ -167,7 +160,8 @@ def _auto_recalibrate_champion(model, val_dataloader, test_dataloader, class2idx
         best_thr, best_cand, best_metrics,
         run_dir=canonical_checkpoint_dir,
         threshold_path=os.path.join(canonical_checkpoint_dir, "thresholds.npz"),
-        lof_checkpoint=os.path.join(canonical_checkpoint_dir, "lof_model.pkl"))
+        lof_checkpoint=os.path.join(canonical_checkpoint_dir, "lof_model.pkl"),
+        preds=best_preds, labels=best_labels)
 
 
 def _cleanup_temp(temp_dir):
@@ -195,11 +189,11 @@ def _build_data_loader_common(args, config, is_train, is_val, shuffle, drop_last
     """Build a DataLoader over the configured dataset."""
     norm_mean, norm_std = const.get_norm_stats(config["backbone_name"])
     if is_train:
-        real_paths = const.PATH_REAL
+        real_paths = cfg.PATH_REAL
         fake_paths = []
     else:
-        real_paths = const.PATH_REAL_OOD if const.PATH_REAL_OOD else const.PATH_REAL
-        fake_paths = const.PATH_FAKE
+        real_paths = cfg.PATH_REAL_OOD if cfg.PATH_REAL_OOD else cfg.PATH_REAL
+        fake_paths = cfg.PATH_FAKE
     dataset_instance = dataset.Dataset(
         real_paths=real_paths,
         fake_paths=fake_paths,
@@ -251,7 +245,7 @@ def build_model(config, args):
     pooling_type = config.get("pooling_type", "mean")
     n_components = config.get("gmm_n_components", 1)
 
-    reals_tag = const.real_tag(const.PATH_REAL)
+    reals_tag = cfg.real_tag(cfg.PATH_REAL)
     gmm_parameters = f"{const.WORKING_DIR}/parameters/{n_components}-gmm_parameters_{config['backbone_name']}_indices_{out_indices_str}_{reals_tag}_{config['input_size']}_{pooling_type}.npy"
 
     if not os.path.exists(gmm_parameters):
@@ -438,15 +432,11 @@ def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx,
     y_true_binary   = np.concatenate([np.ones(min_len, dtype=np.int8),
                                       np.zeros(min_len, dtype=np.int8)])
 
-    _fpr, _tpr, _thr = roc_curve(y_true_binary, scores_balanced)
-    _best            = np.argmax(_tpr - _fpr)
-    _preds_oracle    = (scores_balanced >= _thr[_best]).astype(np.int8)
-
     _mu_real          = float(preds_0_base.mean())
     _distances        = np.abs(scores_balanced - _mu_real)
-    _fpr_b, _tpr_b, _thr_b = roc_curve(y_true_binary, _distances)
-    _best_b           = np.argmax(_tpr_b - _fpr_b)
-    _preds_oracle_b   = (_distances >= _thr_b[_best_b]).astype(np.int8)
+    _fpr_o, _tpr_o, _thr_o = roc_curve(y_true_binary, _distances)
+    _best_o           = np.argmax(_tpr_o - _fpr_o)
+    _preds_oracle     = (_distances >= _thr_o[_best_o]).astype(np.int8)
 
     scores_bilateral = np.abs(scores_balanced - mu_val)
 
@@ -455,10 +445,8 @@ def _compute_class_metrics(c, class_masks, labels, preds, preds_, class2idx,
         'loss_mean':         loss_mean_fake, 'loss_std': loss_std_fake,
         'accuracy':          accuracy_score(y_true_binary, y_pred_balanced),
         'acc_oracle':        accuracy_score(y_true_binary, _preds_oracle),
-        'acc_oracle_bi':     accuracy_score(y_true_binary, _preds_oracle_b),
-        'thr_oracle':        float(_thr[_best]),
-        'thr_oracle_bi':     float(_thr_b[_best_b]),
-        'mu_oracle_bi':      _mu_real,
+        'thr_oracle':        float(_thr_o[_best_o]),
+        'mu_oracle':         _mu_real,
         'ap':                average_precision_score(y_true_binary, scores_bilateral),
         'roc':               roc_auc_score(y_true_binary, scores_bilateral),
     }
@@ -563,7 +551,7 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
 
     classes_to_process = list(classes[1:])
 
-    if const.SHOW_PER_CLASS:
+    if cfg.SHOW_PER_CLASS:
         print("\nComputing metrics using Real as baseline...")
         print("-" * 30)
         print(f"  > Class Real      : \t Accuracy = {acc_real:.4f} ({deployed_thr_str}), \t Loss = {preds_0.mean() if len(preds_0) > 0 else 0:.4f}±{preds_0.std() if len(preds_0) > 0 else 0:.4f}")
@@ -575,44 +563,40 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         ) for c in classes_to_process
     )
 
-    accs_oracle, accs_oracle_bi = [], []
+    accs_oracle = []
     for result in results:
         if result is None:
             continue
-        if const.SHOW_PER_CLASS:
+        if cfg.SHOW_PER_CLASS:
             print(f"  > Class {result['class_name']} : \t Accuracy = {result['accuracy']:.4f} "
-                  f"(oracle={result['acc_oracle']:.4f} @thr={result['thr_oracle']:.4f}, "
-                  f"bi={result['acc_oracle_bi']:.4f} @[{result['mu_oracle_bi']-result['thr_oracle_bi']:.4f}, "
-                  f"{result['mu_oracle_bi']+result['thr_oracle_bi']:.4f}]), "
+                  f"(oracle={result['acc_oracle']:.4f} @[{result['mu_oracle']-result['thr_oracle']:.4f}, "
+                  f"{result['mu_oracle']+result['thr_oracle']:.4f}]), "
                   f"\t AP = {result['ap']:.4f}, \t ROC AUC = {result['roc']:.4f}, \t Loss = {result['loss_mean']:.4f}±{result['loss_std']:.4f}")
             print("-" * 30)
         per_class_metrics[f"loss_per_class/{result['class_name']}"]          = result['loss_mean']
         per_class_metrics[f"loss_std_per_class/{result['class_name']}"]      = result['loss_std']
         per_class_metrics[f"acc_per_class/{result['class_name']}"]           = result['accuracy']
         per_class_metrics[f"acc_oracle_per_class/{result['class_name']}"]    = result['acc_oracle']
-        per_class_metrics[f"acc_oracle_bi_per_class/{result['class_name']}"] = result['acc_oracle_bi']
         per_class_metrics[f"ap_per_class/{result['class_name']}"]            = result['ap']
         per_class_metrics[f"roc_per_class/{result['class_name']}"]           = result['roc']
         aps.append(result['ap'])
         accs.append(result['accuracy'])
         accs_oracle.append(result['acc_oracle'])
-        accs_oracle_bi.append(result['acc_oracle_bi'])
         rocs.append(result['roc'])
         cls.append(result['class_id'])
 
     mean_acc           = np.mean(accs)
     mean_acc_oracle    = np.mean(accs_oracle)
-    mean_acc_oracle_bi = np.mean(accs_oracle_bi)
     mean_ap            = np.mean(aps)
     mean_roc           = np.mean(rocs)
 
     metrics_real_time = time.time() - metrics_real_start_time
-    if const.SHOW_FAMILIES:
+    if cfg.SHOW_FAMILIES:
         print("-" * 30)
         _print_family_summary(_aggregate_by_family(results))
-    if const.SHOW_PER_CLASS and epoch is not None:
+    if cfg.SHOW_PER_CLASS and epoch is not None:
         print(f"⏱️  Metrics computation time (Real baseline): {int(metrics_real_time // 60)}m {int(metrics_real_time % 60)}s")
-    if const.SHOW_PER_CLASS or const.SHOW_FAMILIES:
+    if cfg.SHOW_PER_CLASS or cfg.SHOW_FAMILIES:
         print("=" * 30 + "\n")
 
     per_class_metrics["Val acc"] = mean_acc
@@ -644,34 +628,28 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         ap_g   = average_precision_score(yt_g, sc_g_bi)
         roc_g  = roc_auc_score(yt_g, sc_g_bi)
 
-        _fg, _tg, _thr_g = roc_curve(yt_g, sc_g)
-        _og = np.argmax(_tg - _fg)
-        acc_oracle_g = accuracy_score(yt_g, (sc_g >= _thr_g[_og]).astype(np.int8))
-
         _mu_g  = float(preds_0.mean())
         _dist_g = np.abs(sc_g - _mu_g)
-        _fgb, _tgb, _thr_gb = roc_curve(yt_g, _dist_g)
-        _ogb = np.argmax(_tgb - _fgb)
-        acc_oracle_bi_g = accuracy_score(yt_g, (_dist_g >= _thr_gb[_ogb]).astype(np.int8))
+        _fgo, _tgo, _thr_go = roc_curve(yt_g, _dist_g)
+        _ogo = np.argmax(_tgo - _fgo)
+        acc_oracle_g = accuracy_score(yt_g, (_dist_g >= _thr_go[_ogo]).astype(np.int8))
 
         print(f"\n{'=' * 30}")
         print(f"Global — Real vs All Fake")
-        print(f"  Acc={acc_g:.4f}  (oracle={acc_oracle_g:.4f}, bi={acc_oracle_bi_g:.4f})")
+        print(f"  Acc={acc_g:.4f}  (oracle={acc_oracle_g:.4f})")
         print(f"  AP={ap_g:.4f}   ROC AUC={roc_g:.4f}")
         print(f"{'=' * 30}\n")
 
-        per_class_metrics["global/acc"]           = acc_g
-        per_class_metrics["global/acc_oracle"]    = acc_oracle_g
-        per_class_metrics["global/acc_oracle_bi"] = acc_oracle_bi_g
-        per_class_metrics["global/ap"]            = ap_g
-        per_class_metrics["global/roc"]           = roc_g
+        per_class_metrics["global/acc"]        = acc_g
+        per_class_metrics["global/acc_oracle"] = acc_oracle_g
+        per_class_metrics["global/ap"]         = ap_g
+        per_class_metrics["global/roc"]        = roc_g
 
         global_metrics = {
             'n_balanced':    int(min_n),
             'n_fake_total':  int(len(preds_fake)),
             'acc':           float(round(acc_g, 6)),
             'acc_oracle':    float(round(acc_oracle_g, 6)),
-            'acc_oracle_bi': float(round(acc_oracle_bi_g, 6)),
             'ap':            float(round(ap_g, 6)),
             'roc':           float(round(roc_g, 6)),
         }
@@ -695,7 +673,6 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
             r['class_name']: {
                 'acc':           _r(r['accuracy']),
                 'acc_oracle':    _r(r['acc_oracle']),
-                'acc_oracle_bi': _r(r['acc_oracle_bi']),
                 'ap':            _r(r['ap']),
                 'roc':           _r(r['roc']),
                 'loss_mean':     _r(r['loss_mean'], 4),
@@ -708,7 +685,6 @@ def eval_once(dataloader, model, epoch=None, class2idx=None, threshold_info=None
         'real': {
             'mean_acc':           _r(mean_acc),
             'mean_acc_oracle':    _r(mean_acc_oracle),
-            'mean_acc_oracle_bi': _r(mean_acc_oracle_bi),
             'mean_ap':            _r(mean_ap),
             'mean_roc':           _r(mean_roc),
             'per_class':          _per_class_dict(results),
@@ -854,8 +830,8 @@ def train(args, config, canonical_checkpoint_dir):
     if best_metric > canonical_best_metric:
         _promote_to_canonical(checkpoint_dir, canonical_checkpoint_dir)
         print(f"[champion] New champion!  {best_metric:.4f} > {canonical_best_metric:.4f}")
-        if args.auto_recalibrate:
-            _auto_recalibrate_champion(
+        if args.calibrate:
+            _calibrate_champion(
                 model, val_dataloader, test_dataloader, class2idx,
                 canonical_checkpoint_dir, args.top_k, device)
     else:
@@ -870,7 +846,7 @@ if __name__ == "__main__":
     pprint(vars(args))
     pprint(config)
 
-    canonical_run_name = f"{config['backbone_name']}_{const.real_tag(const.PATH_REAL)}_{config['pooling_type']}"
+    canonical_run_name = f"{config['backbone_name']}_{cfg.real_tag(cfg.PATH_REAL)}_{config['pooling_type']}"
 
     if args.run_name is None:
         calib_tag = "_lof" if args.use_lof else f"_t-alpha{args.alpha}"

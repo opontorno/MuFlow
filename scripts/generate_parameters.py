@@ -11,12 +11,16 @@ from muflow import constants as const
 from muflow.model import build_backbone
 from muflow.patch_utils import image_centroid
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config as cfg
+
 PREFIX = ""
-MEANS_DIR = os.path.join(const.DATA_DIR, "datasets_means", "500")
+MEANS_DIR = os.path.join(const.DATA_DIR, "datasets_means", str(cfg.MEAN_SIZE))
 
 parser = argparse.ArgumentParser(description='Generate GMM parameters for FastFlow')
 parser.add_argument('-model', '--model_name', type=str, required=True)
-parser.add_argument('-reals', '--reals', type=str, default=const.real_tag(const.PATH_REAL),
+parser.add_argument('-reals', '--reals', type=str, default=cfg.real_tag(cfg.PATH_REAL),
                     help="real source name (mean-images subfolder); defaults to the PATH_REAL tag")
 args = parser.parse_args()
 
