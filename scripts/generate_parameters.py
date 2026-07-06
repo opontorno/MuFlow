@@ -18,7 +18,7 @@ import config as cfg
 PREFIX = ""
 MEANS_DIR = os.path.join(cfg.DATA_DIR, "datasets_means", str(cfg.MEAN_SIZE))
 
-parser = argparse.ArgumentParser(description='Generate GMM parameters for FastFlow')
+parser = argparse.ArgumentParser(description='Generate GMM parameters for µFlow')
 parser.add_argument('-model', '--model_name', type=str, default="clip_vitl14")
 parser.add_argument('-reals', '--reals', type=str, default=cfg.real_tag(cfg.PATH_REAL),
                     help="real source name (mean-images subfolder); defaults to the PATH_REAL tag")
