@@ -130,7 +130,7 @@ Pass `--input <glob> --name <folder>` to average a different source.
 ### Step 2 — Fit the GMM
 
 ```bash
-python scripts/generate_parameters.py --model_name clip_vitl14
+python scripts/generate_parameters.py
 ```
 
 This step is optional: `main.py` runs it automatically if the parameters file is missing.
