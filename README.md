@@ -21,8 +21,7 @@ distribution. At inference, the negative log-likelihood of an image is used dire
 score.
 
 > This repository documents **how to train and test the model**. For the method description,
-> experiments and results, see the **[project page](https://opontorno.github.io/MuFlow/)**
-> (arXiv coming soon).
+> experiments and results, see the **[project page](https://opontorno.github.io/MuFlow/)**.
 
 ---
 
