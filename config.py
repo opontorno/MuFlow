@@ -1,7 +1,14 @@
 import os
 
-# ---- Data root (override with MUFLOW_DATA_DIR) ----
-DATA_DIR = os.environ.get("MUFLOW_DATA_DIR", "/media/orazio_mattia_group/ad4dd")
+# ---- Data root ----
+# Set via MUFLOW_DATA_DIR, or hardcode your own path here instead.
+DATA_DIR = os.environ.get("MUFLOW_DATA_DIR")
+if DATA_DIR is None:
+    raise RuntimeError(
+        "MUFLOW_DATA_DIR is not set. Either `export MUFLOW_DATA_DIR=/path/to/your/data`, "
+        "or edit DATA_DIR directly in config.py."
+    )
+DATA_DIR = DATA_DIR.rstrip("/")  # avoid double slashes if the value has a trailing "/"
 
 # ---- Data sources (globs; edit these to point at your data) ----
 PATH_REAL     = [f"{DATA_DIR}/datasets/ffhq/**/*.*g"]

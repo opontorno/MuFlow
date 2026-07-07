@@ -14,8 +14,27 @@ from muflow.patch_utils import random_patches, repr_patches, make_patch_transfor
 CSV_PATH = os.path.join(c.WORKING_DIR, 'data', 'dataset_split_rand.csv')
 
 
+def _glob_many(patterns, kind):
+    """Glob a list of patterns; raise if a non-empty pattern list yields no files."""
+    if not patterns:
+        return []
+    all_files = set()
+    for g in patterns:
+        matched = glob(g, recursive=True)
+        if not matched:
+            raise FileNotFoundError(
+                f"No {kind} images found for glob: {g!r}\n"
+                f"Check DATA_DIR and the {kind} paths in config.py.")
+        all_files.update(matched)
+    return sorted(all_files)
+
+
 def filter_files_by_csv_split(image_files, is_train, is_val=False):
     """Keep only the files belonging to the requested CSV split."""
+    if not os.path.exists(CSV_PATH):
+        raise FileNotFoundError(
+            f"{CSV_PATH} not found. Run scripts/generate_csv.py first "
+            "(after configuring PATH_REAL/PATH_REAL_OOD/PATH_FAKE in config.py).")
     guidance = pd.read_csv(CSV_PATH)
     if is_train:
         split_name = 'val' if is_val else 'train'
@@ -102,12 +121,18 @@ class DeepFakeDataset(Dataset):
 
         self.transform = make_patch_transform(norm_mean, norm_std)
 
-        real_files = sorted({f for g in real_paths for f in glob(g, recursive=True)})
-        fake_files = sorted({f for g in (fake_paths or []) for f in glob(g, recursive=True)})
+        real_files = _glob_many(real_paths, "real")
+        fake_files = _glob_many(fake_paths, "fake")
         real_set = set(real_files)
 
         self.image_files = np.array(real_files + fake_files)
         self.image_files = filter_files_by_csv_split(self.image_files, is_train, is_val)
+
+        if len(self.image_files) == 0:
+            split_name = ('val' if is_val else 'train') if is_train else 'test'
+            raise RuntimeError(
+                f"No images left after filtering by the '{split_name}' split in {CSV_PATH}. "
+                "Re-run scripts/generate_csv.py after configuring config.py's PATH_* patterns.")
 
         self.classes = np.unique([f.split("/")[-2] for f in self.image_files if f not in real_set])
         self.class_to_idx = {cls: idx + 1 for idx, cls in enumerate(self.classes)}

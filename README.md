@@ -66,24 +66,24 @@ pip install -e .
 ## Configuring the datasets
 
 All dataset and reporting settings live in **`config.py`** at the repo root — adapt it to your
-data without touching the library. The core of it is three glob patterns, which you should edit to
-match **your own** folders and file names (there is no mandatory folder structure):
+data without touching the library.
+
+`MUFLOW_DATA_DIR` is **required**: `config.py` raises immediately if it isn't set (either export
+it, or hardcode `DATA_DIR` directly in `config.py`):
+
+```bash
+export MUFLOW_DATA_DIR=/path/to/your/data
+```
+
+The core of it is three glob patterns, shown below with the values **this project** uses for its
+own experiments — edit them to match **your own** folders and file names (there is no mandatory
+folder structure; a glob that matches nothing raises a clear error naming the offending pattern):
 
 ```python
 PATH_REAL     = [f"{DATA_DIR}/datasets/ffhq/**/*.*g"]        # train / val / calibration
 PATH_REAL_OOD = [f"{DATA_DIR}/datasets/celeba_hq/**/*.*g"]   # test baseline (None → reuse PATH_REAL)
 PATH_FAKE     = [f"{DATA_DIR}/datasets/WILD/**/*.*g", ...]    # fake generators (test only)
 ```
-
-`DATA_DIR` (also in `config.py`, overridable with `MUFLOW_DATA_DIR`) is only a convenience prefix
-for these globs:
-
-```bash
-export MUFLOW_DATA_DIR=/path/to/your/data
-```
-
-Exporting `MUFLOW_DATA_DIR` is enough **only if** your folders already match the layout below; for
-any other arrangement, edit the `PATH_*` globs in `config.py` directly to point at your files.
 
 `config.py` also holds the generator **families** (for the per-family report), the console
 **reporting** flags, and the dataset-**prep** knobs (mean size, per-class cap, split ratios) — adjust
@@ -165,11 +165,14 @@ python eval.py --run_dir logs/<run> \
 If you find this work useful, please consider citing:
 
 ```bibtex
-@article{pontorno2026mu,
-  title={$$\backslash$mu $ Flow: Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors},
+@inproceedings{pontorno2026mu,
+  title={µFlow: Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors},
   author={Pontorno, Orazio and Litrico, Mattia and Guarnera, Luca and Giuffrida, Mario Valerio and Battiato, Sebastiano},
-  journal={arXiv preprint arXiv:2606.30528},
-  year={2026}
+  booktitle={European Conference on Computer Vision},
+  pages={},
+  year={2026},
+  organization={Springer}
+}
 }
 ```
 
