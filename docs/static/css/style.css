@@ -205,6 +205,67 @@ body::before {
   box-shadow: 0 6px 18px rgba(220,38,38,0.35);
 }
 
+/* ── Paper dropdown ───────────────────────────────────────── */
+.hero-buttons { position: relative; z-index: 5; }
+
+.hero-dropdown { position: relative; display: inline-block; }
+
+.hero-dropdown > .hero-btn {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.dd-caret {
+  font-size: 0.7rem !important;
+  transition: transform 0.18s ease;
+}
+.hero-dropdown.is-open .dd-caret { transform: rotate(180deg); }
+
+.hero-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  min-width: 170px;
+  padding: 6px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.12);
+  text-align: left;
+
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(-6px);
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
+}
+.hero-dropdown.is-open .hero-dropdown-menu {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+.hero-dropdown-menu a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-radius: 7px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text);
+  text-decoration: none;
+  transition: background 0.12s, color 0.12s;
+}
+.hero-dropdown-menu a i { width: 16px; text-align: center; color: #dc2626; }
+.hero-dropdown-menu a:hover,
+.hero-dropdown-menu a:focus-visible {
+  background: #fef2f2;
+  color: #b91c1c;
+  outline: none;
+}
+
 /* ── Page sections ────────────────────────────────────────── */
 .page-section {
   padding: 5rem 1.5rem;

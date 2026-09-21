@@ -73,7 +73,7 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, help="checkpoint to resume from")
 
     parser.add_argument('--wandb', default='online', choices=['online', 'offline', 'disabled'])
-    parser.add_argument('--wandb_entity', type=str, default='')
+    parser.add_argument('--wandb_entity', type=str, default='orazio-mattia')
     parser.add_argument('--wandb_project', type=str, default='MuFlow')
 
     parser.add_argument('--num_train_patches', type=int, default=const.PATCH_NUM_TRAIN,

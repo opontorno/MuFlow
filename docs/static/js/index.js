@@ -48,3 +48,28 @@ window.addEventListener('scroll', () => {
     }
   });
 }, { passive: true });
+
+
+// ── Paper dropdown ─────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  const dd  = document.getElementById('paper-dropdown');
+  if (!dd) return;
+  const btn = dd.querySelector('button');
+
+  const setOpen = (open) => {
+    dd.classList.toggle('is-open', open);
+    btn.setAttribute('aria-expanded', String(open));
+  };
+
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    setOpen(!dd.classList.contains('is-open'));
+  });
+
+  // Chiudi cliccando fuori, con Esc, o dopo aver scelto un'opzione
+  document.addEventListener('click', (e) => { if (!dd.contains(e.target)) setOpen(false); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { setOpen(false); btn.focus(); }
+  });
+  dd.querySelectorAll('a').forEach(a => a.addEventListener('click', () => setOpen(false)));
+});

@@ -71,9 +71,20 @@
       <a class="hero-btn hero-btn--github" href="https://github.com/opontorno/MuFlow" target="_blank">
         <i class="fab fa-github"></i> Code
       </a>
-      <a class="hero-btn hero-btn--paper" href="https://arxiv.org/pdf/2606.30528" target="_blank">
-        <i class="far fa-file-pdf"></i> Paper
-      </a>
+      <div class="hero-dropdown" id="paper-dropdown">
+        <button type="button" class="hero-btn hero-btn--paper"
+                aria-haspopup="true" aria-expanded="false" aria-controls="paper-menu">
+          <i class="far fa-file-pdf"></i> Paper <i class="fas fa-chevron-down dd-caret"></i>
+        </button>
+        <div class="hero-dropdown-menu" id="paper-menu" role="menu">
+          <a role="menuitem" href="https://arxiv.org/pdf/2606.30528" target="_blank" rel="noopener noreferrer">
+            <i class="ai ai-arxiv"></i> arXiv
+          </a>
+          <a role="menuitem" href="https://doi.org/10.1007/978-3-032-37422-6_20" target="_blank" rel="noopener noreferrer">
+            <i class="fas fa-book"></i> Springer
+          </a>
+        </div>
+      </div>
       <a class="hero-btn" href="https://iplab.dmi.unict.it/mfs/" target="_blank">
         <i class="fas fa-globe"></i> mfs@IPLab Group
       </a>
@@ -378,12 +389,13 @@
       </button>
 <pre class="bibtex-box" id="bibtex-content">
   @inproceedings{pontorno2026mu,
-    title={{{$\mu$Flow}: Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors}},
-    author={Pontorno, Orazio and Litrico, Mattia and Guarnera, Luca and Giuffrida, Mario Valerio and Battiato, Sebastiano},
-    booktitle={European Conference on Computer Vision},
-    year={2026},
-    organization={Springer}
-  }
+  title={$\mu$ Flow: Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors},
+  author={Pontorno, Orazio and Litrico, Mattia and Guarnera, Luca and Giuffrida, Mario Valerio and Battiato, Sebastiano},
+  booktitle={European Conference on Computer Vision},
+  pages={351--370},
+  year={2026},
+  organization={Springer}
+ }
  </pre>
     </div>
   </div>

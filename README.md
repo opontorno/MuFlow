@@ -36,7 +36,7 @@ MuFlow/
 ├── data/                       # split CSV lives here
 ├── scripts/                    # dataset & GMM preparation
 └── src/muflow/                 # the reusable library (model & method only)
-    ├── model.py                # FastFlow model & backbone builder
+    ├── model.py                # µFlow model & backbone builder
     ├── dataset.py              # data loading & transforms
     ├── patch_utils.py          # native-patch sampling & feature extraction
     ├── calibration.py          # threshold calibration & sweep
@@ -80,9 +80,12 @@ own experiments — edit them to match **your own** folders and file names (ther
 folder structure; a glob that matches nothing raises a clear error naming the offending pattern):
 
 ```python
-PATH_REAL     = [f"{DATA_DIR}/datasets/ffhq/**/*.*g"]        # train / val / calibration
-PATH_REAL_OOD = [f"{DATA_DIR}/datasets/celeba_hq/**/*.*g"]   # test baseline (None → reuse PATH_REAL)
-PATH_FAKE     = [f"{DATA_DIR}/datasets/WILD/**/*.*g", ...]    # fake generators (test only)
+PATH_REAL     = [f"{DATA_DIR}/<REAL_DSET-IN>/*.*g"]    # train / val / calibration
+PATH_REAL_OOD = None                                          # or [f"{DATA_DIR}/<REAL_DSET-OUT>/*.*g"]
+                                                              # if None -> reuse PATH_REAL
+PATH_FAKE     = [f"{DATA_DIR}/<FAKE_DSET-1>/*.*g", 
+                 f"{DATA_DIR}/<FAKE_DSET-2>/*.*g",
+                 ...]                                         # fake generators (test only)
 ```
 
 `config.py` also holds the generator **families** (for the per-family report), the console
@@ -166,9 +169,10 @@ If you find this work useful, please consider citing:
 
 ```bibtex
 @inproceedings{pontorno2026mu,
-  title={{{$\mu$Flow}: Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors}},
+  title={$\mu$ Flow: Leveraging Average Images for Improving Generalisation of Deepfake Faces Detectors},
   author={Pontorno, Orazio and Litrico, Mattia and Guarnera, Luca and Giuffrida, Mario Valerio and Battiato, Sebastiano},
   booktitle={European Conference on Computer Vision},
+  pages={351--370},
   year={2026},
   organization={Springer}
 }
