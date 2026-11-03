@@ -11,11 +11,11 @@ if DATA_DIR is None:
 DATA_DIR = DATA_DIR.rstrip("/")  # avoid double slashes if the value has a trailing "/"
 
 # ---- Data sources (globs; edit these to point at your data) ----
-PATH_REAL     = [f"{DATA_DIR}/datasets/ffhq/**/*.*g"]
-PATH_REAL_OOD = [f"{DATA_DIR}/datasets/celeba_hq/**/*.*g"]   # None → reuse PATH_REAL at test time
+PATH_REAL     = [f"{DATA_DIR}/PATH/TO/REAL/*.*g"]
+PATH_REAL_OOD = None # [f"{DATA_DIR}/PATH/TO/OOD_REAL/*.*g"] or None → reuse PATH_REAL at test time
 PATH_FAKE     = [
-    f"{DATA_DIR}/datasets/WILD/**/*.*g",
-    f"{DATA_DIR}/datasets/other_sources/**/*.*g",
+    f"{DATA_DIR}/PATH/TO/FAKE1/*.*g",
+    f"{DATA_DIR}/PATH/TO/FAKE2/*.*g",
 ]
 
 # ---- Generator families for the per-family report (names must match the fake folders) ----
