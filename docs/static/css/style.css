@@ -164,10 +164,13 @@ body::before {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  height: 42px;
+  box-sizing: border-box;
   padding: 10px 24px;
   border-radius: 8px;
   font-size: 0.92rem;
   font-weight: 600;
+  line-height: 1.2;
   text-decoration: none;
   background: var(--blue);
   color: #ffffff;
